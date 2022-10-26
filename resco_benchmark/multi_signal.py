@@ -76,7 +76,13 @@ class MultiSignal(gym.Env):
 
         # this should work on all SUMO versions
         valid_phases = {
-            lightID: list(self.sumo.trafficlight.getAllProgramLogics(lightID)[0].getPhases())
+            lightID: [
+                p
+                for p in self.sumo.trafficlight.getAllProgramLogics(lightID)[
+                    0
+                ].getPhases()
+                if "y" not in p.state and "g" in p.state.lower()
+            ]
             for lightID in self.signal_ids
         }
 
