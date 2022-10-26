@@ -75,7 +75,7 @@ class MultiSignal(gym.Env):
         print("lights", len(self.signal_ids), self.signal_ids)
 
         # this should work on all SUMO versions
-        valid_phases = {
+        self.phases = {
             lightID: [
                 p
                 for p in self.sumo.trafficlight.getAllProgramLogics(lightID)[
@@ -85,8 +85,6 @@ class MultiSignal(gym.Env):
             ]
             for lightID in self.signal_ids
         }
-
-        self.phases = valid_phases
 
         self.signals = {}
 
