@@ -1,5 +1,7 @@
+from typing import Dict
 import numpy as np
 
+from resco_benchmark.traffic_signal import Signal
 from resco_benchmark.config.mdp_config import mdp_configs
 
 
@@ -119,15 +121,14 @@ def mplight_full(signals):
     return observations
 
 
-def wave(signals):
+def wave(signals: Dict[str, Signal]):
     observations = {}
-    for signal_id in signals:
-        signal = signals[signal_id]
+    for signal_id, signal in signals.items():
         state = []
         for direction in signal.lane_sets:
             wave_sum = sum(
-                signal.full_observation[lane]["queue"]
-                + signal.full_observation[lane]["approach"]
+                signal.full_observation[lane].queue
+                + signal.full_observation[lane].approach
                 for lane in signal.lane_sets[direction]
             )
 

@@ -5,6 +5,7 @@ import multiprocessing as mp
 
 from multi_signal import MultiSignal
 import argparse
+from resco_benchmark.agents.agent import SharedAgent
 from resco_benchmark.config.agent_config import agent_configs
 from resco_benchmark.config.map_config import map_configs
 from resco_benchmark.config.mdp_config import mdp_configs
@@ -158,6 +159,40 @@ def run_trial(args, trial):
             agent.observe(obs, rew, done, info)
     env.close()
 
+
+def ga_optimizer(agent: SharedAgent, env: MultiSignal, args: argparse.Namespace) -> None:
+
+    import pygad 
+
+    def fitness_func(solution, solution_idx):
+        agent.set_weights(solution)
+        obs = env.reset()
+        done = False
+        while not done:
+            act = agent.act(obs)
+            obs, rew, done, info = env.step(act)
+            agent.observe(obs, rew, done, info)
+        return env.get_total_reward()
+    
+    ga_instance = pygad.GA(
+        num_generations=args.generations,
+        num_parents_mating=args.parents,
+        initial_population=agent.get_weights(),
+        fitness_func=fitness_func,
+        sol_per_pop=args.population,
+        num_genes=agent.get_num_weights(),
+        mutation_percent_genes=args.mutation,
+        parent_selection_type="sss",
+        crossover_type="single_point",
+        mutation_type="random",
+        mutation_by_replacement=True,
+        keep_parents=args.parents,
+        on_generation=env.on_generation,
+        on_start=env.on_start,
+        on_finish=env.on_finish,
+    )
+
+    ga_instance.run()
 
 if __name__ == "__main__":
     main()

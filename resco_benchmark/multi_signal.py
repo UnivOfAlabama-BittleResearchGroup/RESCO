@@ -1,4 +1,6 @@
 import os
+from os import PathLike
+from typing import Dict, List, Tuple
 import numpy as np
 import traci
 import sumolib
@@ -9,23 +11,23 @@ from resco_benchmark.traffic_signal import Signal
 class MultiSignal(gym.Env):
     def __init__(
         self,
-        run_name,
-        map_name,
-        net,
-        state_fn,
-        reward_fn,
-        route=None,
-        gui=False,
-        end_time=3600,
-        step_length=10,
-        yellow_length=4,
-        step_ratio=1,
-        max_distance=200,
-        lights=(),
-        log_dir="/",
-        libsumo=False,
-        warmup=0,
-        gymma=False,
+        run_name: str,
+        map_name: str,
+        net: str,
+        state_fn: callable,
+        reward_fn: callable,
+        route: str = None,
+        gui: bool = False,
+        end_time: float = 3600,
+        step_length: float = 10,
+        yellow_length: float = 4,
+        step_ratio: int = 1,
+        max_distance: float = 200,
+        lights: Tuple[str] = (),
+        log_dir: PathLike = "/",
+        libsumo: bool = False,
+        warmup: float = 0,
+        gymma: bool = False,
     ):
         self.libsumo = libsumo
         self.gymma = (
@@ -44,14 +46,24 @@ class MultiSignal(gym.Env):
         self.end_time = end_time
         self.step_length = step_length
         self.yellow_length = yellow_length
-        self.step_ratio = step_ratio
+        self.step_ratio = int(step_ratio)
         self.connection_name = (
             f"{run_name}-{map_name}---{state_fn.__name__}-{reward_fn.__name__}"
         )
 
+        self.all_ts_ids = lights
         self.map_name = map_name
 
-        # Run some steps in the simulation with default light configurations to detect phases
+        self.signal_ids: List[str] = []
+        self.obs_shape: Dict[str, int] = {}
+        self.observation_space: List[int] = []
+        self.action_space: List[int] = []
+        self.signals: Dict[str, Signal] = {}
+
+        self.run = 0
+        self.metrics = []
+        self.wait_metric = {}
+
         if self.route is not None:
             sumo_cmd = [
                 sumolib.checkBinary("sumo"),
@@ -65,12 +77,70 @@ class MultiSignal(gym.Env):
 
         else:
             sumo_cmd = [sumolib.checkBinary("sumo"), "-c", net, "--no-warnings", "True"]
-        if self.libsumo:
-            traci.start(sumo_cmd)
-            self.sumo = traci
-        else:
-            traci.start(sumo_cmd, label=self.connection_name)
-            self.sumo = traci.getConnection(self.connection_name)
+
+        # Start sumo, so that we can detect the phases
+        self.connect_sumo(sumo_cmd)
+        # Run some steps in the simulation with default light configurations to detect phases
+        self._init_phases()
+
+        # deduce the step length via the initial connection
+        self._sumo_step_length: float = self.sumo.simulation.getDeltaT()
+
+        # Pull signal observation shapes
+        self._init_agents(self.all_ts_ids)
+
+        self._disconnect_sumo()
+
+        self.connection_name = f"{run_name}-{map_name}-{len(lights)}-{state_fn.__name__}-{reward_fn.__name__}"
+
+        if not os.path.exists(log_dir + self.connection_name):
+            os.makedirs(log_dir + self.connection_name)
+
+        self.sumo_cmd = None
+        print("Connection ID", self.connection_name)
+
+    def _disconnect_sumo(self):
+        if not self.libsumo:
+            traci.switch(self.connection_name)
+        traci.close()
+
+    def _init_agents(self, signal_ids):
+        self.signals = {
+            signal_id: Signal(
+                self.map_name,
+                self.sumo,
+                signal_id,
+                self.yellow_length,
+                self.phases[signal_id],
+            )
+            for signal_id in signal_ids
+        }
+
+        for ts in signal_ids:
+            self.signals[
+                ts
+            ].signals = (
+                self.signals
+            )  # pass all signals to each signal, in the case of multi-agent
+            self.signals[ts].observe(
+                self.step_length, self.max_distance
+            )  # observe the state of the signal
+
+        observations = self.state_fn(self.signals)
+        self.ts_order = []
+
+        for ts in observations:
+            if ts in ["top_mgr", "bot_mgr"]:
+                continue  # Not a traffic signal
+            o_shape = observations[ts].shape
+            self.obs_shape[ts] = o_shape
+            o_shape = gym.spaces.Box(low=-np.inf, high=np.inf, shape=o_shape)
+            self.ts_order.append(ts)
+            self.observation_space.append(o_shape)
+            self.action_space.append(gym.spaces.Discrete(len(self.phases[ts])))
+
+    def _init_phases(self, ):
+
         self.signal_ids = self.sumo.trafficlight.getIDList()
         print("lights", len(self.signal_ids), self.signal_ids)
 
@@ -86,66 +156,31 @@ class MultiSignal(gym.Env):
             for lightID in self.signal_ids
         }
 
-        self.signals = {}
-
-        self.all_ts_ids = (
-            lights if len(lights) > 0 else self.sumo.trafficlight.getIDList()
-        )
+        self.all_ts_ids = self.all_ts_ids or self.sumo.trafficlight.getIDList()
         self.ts_starter = len(self.all_ts_ids)
-        self.signal_ids = []
-
-        # Pull signal observation shapes
-        self.obs_shape = {}
-        self.observation_space = []
-        self.action_space = []
-        for ts in self.all_ts_ids:
-            self.signals[ts] = Signal(
-                self.map_name, self.sumo, ts, self.yellow_length, self.phases[ts]
-            )
-        for ts in self.all_ts_ids:
-            self.signals[ts].signals = self.signals
-            self.signals[ts].observe(self.step_length, self.max_distance)
-        observations = self.state_fn(self.signals)
-        self.ts_order = []
-        for ts in observations:
-            if ts in ["top_mgr", "bot_mgr"]:
-                continue  # Not a traffic signal
-            o_shape = observations[ts].shape
-            self.obs_shape[ts] = o_shape
-            o_shape = gym.spaces.Box(low=-np.inf, high=np.inf, shape=o_shape)
-            self.ts_order.append(ts)
-            self.observation_space.append(o_shape)
-            self.action_space.append(gym.spaces.Discrete(len(self.phases[ts])))
-
         self.n_agents = self.ts_starter
 
-        self.run = 0
-        self.metrics = []
-        self.wait_metric = {}
-
-        if not self.libsumo:
-            traci.switch(self.connection_name)
-        traci.close()
-        self.connection_name = f"{run_name}-{map_name}-{len(lights)}-{state_fn.__name__}-{reward_fn.__name__}"
-
-        if not os.path.exists(log_dir + self.connection_name):
-            os.makedirs(log_dir + self.connection_name)
-        self.sumo_cmd = None
-        print("Connection ID", self.connection_name)
+    def connect_sumo(self, sumo_cmd):
+        if self.libsumo:
+            traci.start(sumo_cmd)
+            self.sumo = traci
+        else:
+            traci.start(sumo_cmd, label=self.connection_name)
+            self.sumo = traci.getConnection(self.connection_name)
 
     def step_sim(self):
         # The monaco scenario expects .25s steps instead of 1s, account for that here.
         for _ in range(self.step_ratio):
             self.sumo.simulationStep()
+        # self.sumo.simulationStep(self.step_ratio)  # * self._sumo_step_length)
 
     def reset(self):
+        
         if self.run != 0:
-            if not self.libsumo:
-                traci.switch(self.connection_name)
-            traci.close()
+            self._disconnect_sumo()
             self.save_metrics()
+        
         self.metrics = []
-
         self.run += 1
 
         # Start a new simulation
@@ -188,14 +223,7 @@ class MultiSignal(gym.Env):
         if self.run % 30 == 0 and self.ts_starter < len(self.all_ts_ids):
             self.ts_starter += 1
         self.signal_ids = [self.all_ts_ids[i] for i in range(self.ts_starter)]
-        for ts in self.signal_ids:
-            self.signals[ts] = Signal(
-                self.map_name, self.sumo, ts, self.yellow_length, self.phases[ts]
-            )
-            self.wait_metric[ts] = 0.0
-        for ts in self.signal_ids:
-            self.signals[ts].signals = self.signals
-            self.signals[ts].observe(self.step_length, self.max_distance)
+        self._init_agents(self.signal_ids)
 
         if self.gymma:
             states = self.state_fn(self.signals)
@@ -214,6 +242,7 @@ class MultiSignal(gym.Env):
 
         for _ in range(self.yellow_length):
             self.step_sim()
+
         for signal in self.signal_ids:
             self.signals[signal].set_phase()
         for _ in range(self.step_length - self.yellow_length):
