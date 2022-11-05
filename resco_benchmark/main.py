@@ -29,6 +29,7 @@ def main():
             "MPLightFULL",
             "FMA2CFull",
             "FMA2CVAL",
+            "MINJUNG"
         ],
     )
     ap.add_argument("--trials", type=int, default=1)
@@ -160,9 +161,11 @@ def run_trial(args, trial):
     env.close()
 
 
-def ga_optimizer(agent: SharedAgent, env: MultiSignal, args: argparse.Namespace) -> None:
+def ga_optimizer(
+    agent: SharedAgent, env: MultiSignal, args: argparse.Namespace
+) -> None:
 
-    import pygad 
+    import pygad
 
     def fitness_func(solution, solution_idx):
         agent.set_weights(solution)
@@ -173,7 +176,7 @@ def ga_optimizer(agent: SharedAgent, env: MultiSignal, args: argparse.Namespace)
             obs, rew, done, info = env.step(act)
             agent.observe(obs, rew, done, info)
         return env.get_total_reward()
-    
+
     ga_instance = pygad.GA(
         num_generations=args.generations,
         num_parents_mating=args.parents,
@@ -193,6 +196,7 @@ def ga_optimizer(agent: SharedAgent, env: MultiSignal, args: argparse.Namespace)
     )
 
     ga_instance.run()
+
 
 if __name__ == "__main__":
     main()

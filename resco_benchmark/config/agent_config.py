@@ -3,6 +3,7 @@ import resco_benchmark.states as states
 
 from resco_benchmark.agents.stochastic import STOCHASTIC
 from resco_benchmark.agents.maxwave import MAXWAVE
+from resco_benchmark.agents.minjung import MINJUNG
 from resco_benchmark.agents.maxpressure import MAXPRESSURE
 from resco_benchmark.agents.pfrl_dqn import IDQN
 from resco_benchmark.agents.pfrl_ppo import IPPO
@@ -11,6 +12,12 @@ from resco_benchmark.agents.fma2c import FMA2C
 
 agent_configs = {
     # *VAL configs have distance settings according to the validation scenarios
+    "MINJUNG": {
+        "agent": MINJUNG,
+        "state": states.minjung,
+        "reward": rewards.fuel_consumption,
+        "max_distance": 100,
+    },
     "MAXWAVEVAL": {
         "agent": MAXWAVE,
         "state": states.wave,

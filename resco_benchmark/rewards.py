@@ -1,37 +1,61 @@
+from typing import Dict, List
+import functools
+
 import numpy as np
 
+import traci.constants as tc
+
 from resco_benchmark.config.mdp_config import mdp_configs
+from resco_benchmark.traffic_signal import Signal
+from resco_benchmark.utils.traci_help import add_traci_subcriptions
 
 
-def wait(signals):
-    rewards = dict()
+@add_traci_subcriptions({"vehicle": [tc.VAR_FUELCONSUMPTION]})
+def fuel_consumption(signals: List[Signal]):
+    rewards = {}
     for signal_id in signals:
-        total_wait = 0
-        for lane in signals[signal_id].lanes:
-            total_wait += signals[signal_id].full_observation[lane]["total_wait"]
+        signal = signals[signal_id]
+        reward = sum(
+            sum(veh[tc.VAR_FUELCONSUMPTION] for veh in signal.full_observation[lane].vehicles)
+            for lane in signal.lanes
+        )
+        rewards[signal_id] = -reward
+    return rewards
 
+
+# the total wait is a default traci subscription
+@add_traci_subcriptions({})
+def wait(signals: Dict[str, Signal]):
+    rewards = {}
+    for signal_id in signals:
+        total_wait = sum(
+            signals[signal_id].full_observation[lane]["total_wait"]
+            for lane in signals[signal_id].lanes
+        )
         rewards[signal_id] = -total_wait
     return rewards
 
 
-def wait_norm(signals):
-    rewards = dict()
+@add_traci_subcriptions()
+def wait_norm(signals: Dict[str, Signal]):
+    rewards = {}
     for signal_id in signals:
-        total_wait = 0
-        for lane in signals[signal_id].lanes:
-            total_wait += signals[signal_id].full_observation[lane]["total_wait"]
-
+        total_wait = sum(
+            signals[signal_id].full_observation[lane]["total_wait"]
+            for lane in signals[signal_id].lanes
+        )
         rewards[signal_id] = np.clip(-total_wait / 224, -4, 4).astype(np.float32)
     return rewards
 
 
-def pressure(signals):
-    rewards = dict()
+@add_traci_subcriptions()
+def pressure(signals: Dict[str, Signal]):
+    rewards = {}
     for signal_id in signals:
-        queue_length = 0
-        for lane in signals[signal_id].lanes:
-            queue_length += signals[signal_id].full_observation[lane]["queue"]
-
+        queue_length = sum(
+            signals[signal_id].full_observation[lane]["queue"]
+            for lane in signals[signal_id].lanes
+        )
         for lane in signals[signal_id].outbound_lanes:
             dwn_signal = signals[signal_id].out_lane_to_signalid[lane]
             if dwn_signal in signals[signal_id].signals:
@@ -45,10 +69,10 @@ def pressure(signals):
     return rewards
 
 
-def queue_maxwait(signals):
-    rewards = dict()
-    for signal_id in signals:
-        signal = signals[signal_id]
+@add_traci_subcriptions()
+def queue_maxwait(signals: Dict[str, Signal]):
+    rewards = {}
+    for signal_id, signal in signals.items():
         reward = 0
         for lane in signal.lanes:
             reward += signal.full_observation[lane]["queue"]
@@ -59,13 +83,12 @@ def queue_maxwait(signals):
     return rewards
 
 
-def queue_maxwait_neighborhood(signals):
+@add_traci_subcriptions()
+def queue_maxwait_neighborhood(signals: Dict[str, Signal]):
     rewards = queue_maxwait(signals)
-    neighborhood_rewards = dict()
-    for signal_id in signals:
-        signal = signals[signal_id]
+    neighborhood_rewards = {}
+    for signal_id, signal in signals.items():
         sum_reward = rewards[signal_id]
-
         for key in signal.downstream:
             neighbor = signal.downstream[key]
             if neighbor is not None:
@@ -75,22 +98,22 @@ def queue_maxwait_neighborhood(signals):
     return neighborhood_rewards
 
 
-def fma2c(signals):
+@add_traci_subcriptions()
+def fma2c(signals: Dict[str, Signal]):
     fma2c_config = mdp_configs["FMA2C"]
     management = fma2c_config["management"]
     supervisors = fma2c_config["supervisors"]  # reverse of management
     management_neighbors = fma2c_config["management_neighbors"]
 
-    region_fringes = dict()
-    fringe_arrivals = dict()
-    liquidity = dict()
+    region_fringes = {}
+    fringe_arrivals = {}
+    liquidity = {}
     for manager in management:
         region_fringes[manager] = []
         fringe_arrivals[manager] = 0
         liquidity[manager] = 0
 
-    for signal_id in signals:
-        signal = signals[signal_id]
+    for signal_id, signal in signals.items():
         for key in signal.downstream:
             neighbor = signal.downstream[key]
             if neighbor is None or supervisors[neighbor] != supervisors[signal_id]:
@@ -113,7 +136,7 @@ def fma2c(signals):
                     if vehicle["id"] in arrivals:
                         fringe_arrivals[manager] += 1
 
-    management_neighborhood = dict()
+    management_neighborhood = {}
     for manager in management:
         mgr_rew = fringe_arrivals[manager] + liquidity[manager]
         for neighbor in management_neighbors[manager]:
@@ -122,7 +145,7 @@ def fma2c(signals):
             )
         management_neighborhood[manager] = mgr_rew
 
-    rewards = dict()
+    rewards = {}
     for signal_id in signals:
         signal = signals[signal_id]
         reward = 0
@@ -133,7 +156,7 @@ def fma2c(signals):
             )
         rewards[signal_id] = -reward
 
-    neighborhood_rewards = dict()
+    neighborhood_rewards = {}
     for signal_id in signals:
         signal = signals[signal_id]
         sum_reward = rewards[signal_id]
@@ -144,26 +167,26 @@ def fma2c(signals):
                 sum_reward += fma2c_config["alpha"] * rewards[neighbor]
         neighborhood_rewards[signal_id] = sum_reward
 
-    neighborhood_rewards.update(management_neighborhood)
+    neighborhood_rewards |= management_neighborhood
     return neighborhood_rewards
 
 
-def fma2c_full(signals):
+@add_traci_subcriptions()
+def fma2c_full(signals: Dict[str, Signal]):
     fma2c_config = mdp_configs["FMA2CFull"]
     management = fma2c_config["management"]
     supervisors = fma2c_config["supervisors"]  # reverse of management
     management_neighbors = fma2c_config["management_neighbors"]
 
-    region_fringes = dict()
-    fringe_arrivals = dict()
-    liquidity = dict()
+    region_fringes = {}
+    fringe_arrivals = {}
+    liquidity = {}
     for manager in management:
         region_fringes[manager] = []
         fringe_arrivals[manager] = 0
         liquidity[manager] = 0
 
-    for signal_id in signals:
-        signal = signals[signal_id]
+    for signal_id, signal in signals.items():
         for key in signal.downstream:
             neighbor = signal.downstream[key]
             if neighbor is None or supervisors[neighbor] != supervisors[signal_id]:
@@ -186,7 +209,7 @@ def fma2c_full(signals):
                     if vehicle["id"] in arrivals:
                         fringe_arrivals[manager] += 1
 
-    management_neighborhood = dict()
+    management_neighborhood = {}
     for manager in management:
         mgr_rew = fringe_arrivals[manager] + liquidity[manager]
         for neighbor in management_neighbors[manager]:
@@ -195,7 +218,7 @@ def fma2c_full(signals):
             )
         management_neighborhood[manager] = mgr_rew
 
-    rewards = dict()
+    rewards = {}
     for signal_id in signals:
         signal = signals[signal_id]
         reward = 0
@@ -207,7 +230,7 @@ def fma2c_full(signals):
             )
         rewards[signal_id] = -reward
 
-    neighborhood_rewards = dict()
+    neighborhood_rewards = {}
     for signal_id in signals:
         signal = signals[signal_id]
         sum_reward = rewards[signal_id]
@@ -218,5 +241,5 @@ def fma2c_full(signals):
                 sum_reward += fma2c_config["alpha"] * rewards[neighbor]
         neighborhood_rewards[signal_id] = sum_reward
 
-    neighborhood_rewards.update(management_neighborhood)
+    neighborhood_rewards |= management_neighborhood
     return neighborhood_rewards

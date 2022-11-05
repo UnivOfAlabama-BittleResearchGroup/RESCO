@@ -3,7 +3,7 @@ map_configs = {
         "lights": [],
         "net": "environments/grid4x4/grid4x4.net.xml",
         "route": "environments/grid4x4/grid4x4",
-        "step_length": 10,
+        "step_length": 1,
         "yellow_length": 3,
         "step_ratio": 1,
         "start_time": 0,

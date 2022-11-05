@@ -1,8 +1,9 @@
 import os
 from os import PathLike
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 import numpy as np
 import traci
+import traci.constants as tc
 import sumolib
 import gym
 from resco_benchmark.traffic_signal import Signal
@@ -14,8 +15,8 @@ class MultiSignal(gym.Env):
         run_name: str,
         map_name: str,
         net: str,
-        state_fn: callable,
-        reward_fn: callable,
+        state_fn: Tuple[callable, Dict[str, int]],
+        reward_fn: Tuple[callable, Dict[str, int]],
         route: str = None,
         gui: bool = False,
         end_time: float = 3600,
@@ -28,27 +29,36 @@ class MultiSignal(gym.Env):
         libsumo: bool = False,
         warmup: float = 0,
         gymma: bool = False,
+        min_green: float = None,
     ):
         self.libsumo = libsumo
         self.gymma = (
             gymma  # gymma expects sequential list of states/rewards instead of dict
         )
-        print(map_name, net, state_fn.__name__, reward_fn.__name__)
+        print(map_name, net, state_fn[0].__name__, reward_fn[0].__name__)
         self.log_dir = log_dir
         self.net = net
         self.route = route
         self.gui = gui
-        self.state_fn = state_fn
-        self.reward_fn = reward_fn
+        self.state_fn, self.state_subs = state_fn
+        
         self.max_distance = max_distance
         self.warmup = warmup
 
+        # create the reward function and update the subscriptions
+        self.reward_fn, self.reward_subs = reward_fn
+
         self.end_time = end_time
         self.step_length = step_length
+
+        # TODO: both yellow length and min green should be customizable per signal (and really per phase)
         self.yellow_length = yellow_length
+        self.min_green = min_green or step_length
+
+        # sourcery skip: remove-unnecessary-cast
         self.step_ratio = int(step_ratio)
         self.connection_name = (
-            f"{run_name}-{map_name}---{state_fn.__name__}-{reward_fn.__name__}"
+            f"{run_name}-{map_name}---{self.state_fn.__name__}-{self.reward_fn.__name__}"
         )
 
         self.all_ts_ids = lights
@@ -59,6 +69,7 @@ class MultiSignal(gym.Env):
         self.observation_space: List[int] = []
         self.action_space: List[int] = []
         self.signals: Dict[str, Signal] = {}
+        self.vehicle_subscriptions: Set[int] = set()
 
         self.run = 0
         self.metrics = []
@@ -85,13 +96,14 @@ class MultiSignal(gym.Env):
 
         # deduce the step length via the initial connection
         self._sumo_step_length: float = self.sumo.simulation.getDeltaT()
+        self._sumo_time: float = 0  # store the internal sumo time
 
         # Pull signal observation shapes
-        self._init_agents(self.all_ts_ids)
+        self._init_agents(self.all_ts_ids, self.reward_subs, self.state_subs)
 
         self._disconnect_sumo()
 
-        self.connection_name = f"{run_name}-{map_name}-{len(lights)}-{state_fn.__name__}-{reward_fn.__name__}"
+        self.connection_name = f"{run_name}-{map_name}-{len(lights)}-{self.state_fn.__name__}-{self.reward_fn.__name__}"
 
         if not os.path.exists(log_dir + self.connection_name):
             os.makedirs(log_dir + self.connection_name)
@@ -99,22 +111,35 @@ class MultiSignal(gym.Env):
         self.sumo_cmd = None
         print("Connection ID", self.connection_name)
 
+
     def _disconnect_sumo(self):
         if not self.libsumo:
             traci.switch(self.connection_name)
         traci.close()
 
-    def _init_agents(self, signal_ids):
+    def _init_agents(self, signal_ids, reward_subs: Dict[str, int], state_subs: Dict[str, int]):
         self.signals = {
             signal_id: Signal(
-                self.map_name,
-                self.sumo,
-                signal_id,
-                self.yellow_length,
-                self.phases[signal_id],
+                map_name=self.map_name,
+                sumo=self.sumo,
+                id=signal_id,
+                yellow_length=self.yellow_length,
+                min_green=self.min_green,  # this is a current limitation, need this to be a env parameter
+                phases=self.phases[signal_id],
+                reward_subscriptions=reward_subs,
+                state_subscriptions=state_subs,
             )
             for signal_id in signal_ids
         }
+
+        # build the sumo subscription dict
+        veh_subs = []
+        for signal in self.signals.values():
+            veh_subs.extend(signal.SUBSCRIPTIONS["vehicle"])
+        self.vehicle_subscriptions = set(veh_subs)
+
+        # step the simulation to get the initial state
+        lane_dict, veh_dict = self.step_sim()
 
         for ts in signal_ids:
             self.signals[
@@ -122,8 +147,10 @@ class MultiSignal(gym.Env):
             ].signals = (
                 self.signals
             )  # pass all signals to each signal, in the case of multi-agent
-            self.signals[ts].observe(
-                self.step_length, self.max_distance
+            self.signals[ts].observe( 
+                self.max_distance,
+                veh_observations=veh_dict,
+                lane_observations=lane_dict,
             )  # observe the state of the signal
 
         observations = self.state_fn(self.signals)
@@ -139,7 +166,9 @@ class MultiSignal(gym.Env):
             self.observation_space.append(o_shape)
             self.action_space.append(gym.spaces.Discrete(len(self.phases[ts])))
 
-    def _init_phases(self, ):
+    def _init_phases(
+        self,
+    ):
 
         self.signal_ids = self.sumo.trafficlight.getIDList()
         print("lights", len(self.signal_ids), self.signal_ids)
@@ -168,18 +197,25 @@ class MultiSignal(gym.Env):
             traci.start(sumo_cmd, label=self.connection_name)
             self.sumo = traci.getConnection(self.connection_name)
 
-    def step_sim(self):
+    def step_sim(self) -> Tuple[Dict, Dict]:
         # The monaco scenario expects .25s steps instead of 1s, account for that here.
-        for _ in range(self.step_ratio):
-            self.sumo.simulationStep()
-        # self.sumo.simulationStep(self.step_ratio)  # * self._sumo_step_length)
+        # for _ in range(self.step_ratio):
+        self._sumo_time += self._sumo_step_length * self.step_ratio
+        self.sumo.simulationStep(self._sumo_time)
+
+        # subscribe to all new vehicles in the network
+        for veh in self.sumo.simulation.getDepartedIDList():
+            self.sumo.vehicle.subscribe(veh, self.vehicle_subscriptions)
+        
+        # return the lane & vehicle observations
+        return self.sumo.lane.getAllSubscriptionResults(), self.sumo.vehicle.getAllSubscriptionResults()
 
     def reset(self):
-        
+
         if self.run != 0:
             self._disconnect_sumo()
             self.save_metrics()
-        
+
         self.metrics = []
         self.run += 1
 
@@ -223,32 +259,41 @@ class MultiSignal(gym.Env):
         if self.run % 30 == 0 and self.ts_starter < len(self.all_ts_ids):
             self.ts_starter += 1
         self.signal_ids = [self.all_ts_ids[i] for i in range(self.ts_starter)]
-        self._init_agents(self.signal_ids)
+
+        self._init_agents(self.signal_ids, self.reward_subs, self.state_subs)
 
         if self.gymma:
             states = self.state_fn(self.signals)
             return [states[ts] for ts in self.ts_order]
 
+        # do the sumo call only once
+        self._sumo_time = self.sumo.simulation.getTime()
+
         return self.state_fn(self.signals)
+
+    @property
+    def sumo_time(
+        self,
+    ) -> float:
+        return self._sumo_time
 
     def step(self, act):
         if self.gymma:
             dict_act = {ts: act[i] for i, ts in enumerate(self.ts_order)}
             act = dict_act
 
-        # Send actions to their signals
-        for signal in self.signals:
-            self.signals[signal].prep_phase(act[signal])
+        for signal in self.signal_ids:
+            self.signals[signal].set_phase(self.sumo_time, act[signal])
 
-        for _ in range(self.yellow_length):
-            self.step_sim()
+        # step the simulation
+        lane_obs, vehicle_obs = self.step_sim()
 
         for signal in self.signal_ids:
-            self.signals[signal].set_phase()
-        for _ in range(self.step_length - self.yellow_length):
-            self.step_sim()
-        for signal in self.signal_ids:
-            self.signals[signal].observe(self.step_length, self.max_distance)
+            self.signals[signal].observe(
+                self.max_distance,
+                veh_observations=vehicle_obs,
+                lane_observations=lane_obs,
+            )
 
         # observe new state and reward
         observations = self.state_fn(self.signals)
@@ -308,3 +353,6 @@ class MultiSignal(gym.Env):
             traci.switch(self.connection_name)
         traci.close()
         self.save_metrics()
+
+    def get_total_reward(self):
+        return sum(metric['reward'] for metric in self.metrics)

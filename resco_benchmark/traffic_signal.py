@@ -1,8 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 import queue
-from typing import Dict, List, Set, Tuple, Union
-from collections import UserDict
+from typing import Dict, Iterable, List, Set, Tuple, Union, Any
 import traci
+import traci.constants as tc
 import copy
 import re
 from resco_benchmark.config.signal_config import signal_configs
@@ -38,15 +39,15 @@ def create_yellows(phases, yellow_length):
 
 
 class _Dict:
-
     def __getitem__(self, key):
         return self.__dict__[key]
-    
+
     def __delitem__(self, key):
         del self.__dict__[key]
 
     def __setitem__(self, key, value):
         self.__dict__[key] = value
+
 
 @dataclass
 class VehicleMeasures(_Dict):
@@ -56,6 +57,13 @@ class VehicleMeasures(_Dict):
     acceleration: float
     position: float
     type: str
+    other: Dict[str, Any] = None
+
+    def __getitem__(self, key):
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            return self.other[key]
 
 
 @dataclass
@@ -64,8 +72,7 @@ class LaneMeasures(_Dict):
     approach: int
     total_wait: int
     max_wait: int
-    _vehicles: List[VehicleMeasures] = None
-
+    _vehicles: List[VehicleMeasures] = field(default_factory=list)
 
     def add_vehicle(self, veh: VehicleMeasures) -> None:
         if veh.wait > 0:
@@ -74,12 +81,21 @@ class LaneMeasures(_Dict):
             self.max_wait = max(self.max_wait, veh.wait)
         else:
             self.approach += 1
-    
+        
+        self._vehicles.append(veh)
+
     @property
     def vehicles(
         self,
     ) -> List[VehicleMeasures]:
-        return self._vehicles.copy()
+        return self._vehicles or []
+
+    @property
+    def fuel_consumption(self) -> float:
+        return sum(
+                v.fuel_consumption
+                for v in self._vehicles
+        )
 
 
 class FullObservation(_Dict):
@@ -118,30 +134,103 @@ class FullObservation(_Dict):
 
     def update_vehicles(self, all_vehicles: Set[str]) -> None:
         if self._last_step_vehicles:
-            self._arrivals = self._last_step_vehicles.difference(all_vehicles)
-            self._departures = all_vehicles.difference(self._last_step_vehicles)
+            self._arrivals = all_vehicles.difference(self._last_step_vehicles)
+            self._departures = self._last_step_vehicles.difference(all_vehicles)
         else:
             self._arrivals = all_vehicles
         self._last_step_vehicles = all_vehicles
 
 
+class LightState(Enum):
+    RED = 0
+    GREEN = 1
+    YELLOW = 2
+
+
+class _SignalTimer:
+    """
+    There is no (all) red state in the timer for the time being
+    """
+    
+    # TODO: build support for all red
+
+    def __init__(self, min_yellow: float, min_green: float) -> None:
+        self._current_state: LightState = LightState.RED
+        self._start_time: int = 0
+        self._min_yellow: float = min_yellow
+        self._min_green: float = min_green
+
+    @property
+    def state(self) -> LightState:
+        return self._current_state
+
+    def reset(self) -> None:
+        self._current_state = LightState.RED
+        self._start_time = 0
+
+    def okay_to_switch(self, current_time: int) -> bool:
+        # if self._current_state == LightState.GREEN:
+        #     return True
+        if self._current_state == LightState.YELLOW:
+            return current_time - self._start_time >= self._min_yellow
+        else:
+            return current_time - self._start_time >= self._min_green
+
+    def update(self, current_time: int) -> None:
+        if self._current_state == LightState.YELLOW:
+            self._current_state = LightState.GREEN
+        else:
+            self._current_state = LightState.YELLOW
+
+        self._start_time = current_time
+
+
 class Signal:
-    def __init__(self, map_name, sumo, id, yellow_length, phases):
+
+    SUBSCRIPTIONS = {
+        "lane": [tc.LAST_STEP_VEHICLE_ID_LIST],
+        "vehicle": [
+            tc.VAR_NEXT_TLS,
+            tc.VAR_WAITING_TIME,
+            tc.VAR_SPEED,
+            tc.VAR_ACCELERATION,
+            tc.VAR_LANEPOSITION,
+            tc.VAR_TYPE
+        ],
+    }
+
+    def __init__(self, 
+        map_name: str, 
+        sumo: traci.Connection, 
+        id: str, 
+        yellow_length: float, 
+        min_green: float, 
+        phases: Dict[str, List[traci.trafficlight.Phase]],
+        reward_subscriptions: List[str],
+        state_subscriptions: List[str],
+        ):
         # sourcery skip: raise-specific-error
-        self.sumo: traci.Connection = sumo
+        self.sumo: traci = sumo
         self.id: str = id
         self.yellow_time: float = yellow_length
         self.next_phase: int = 0
+
+        # update the subscription dict
+        for subs in (reward_subscriptions, state_subscriptions):
+            for type_ in ('lane', 'vehicle'):
+                if type_ in subs:
+                    self.SUBSCRIPTIONS[type_].extend(subs[type_])
+                    self.SUBSCRIPTIONS[type_] = list(set(self.SUBSCRIPTIONS[type_]))
 
         # Unique lanes
         self.lanes = []
         self.outbound_lanes = []
 
-        # Group of lanes constituting a direction of traffic
-        self.build_config(signal_configs[map_name])
-
+        # store waiting times
         self.waiting_times: Dict[str, float] = {}
 
+        # Group of lanes constituting a direction of traffic
+        self.build_config(signal_configs[map_name])
         self.phases, self.yellow_dict = create_yellows(phases, yellow_length)
 
         # logic = self.sumo.trafficlight.Logic(id, 0, 0, phases=self.phases) # not compatible with libsumo
@@ -150,11 +239,25 @@ class Signal:
         logic.type = 0
         logic.phases = self.phases
         self.sumo.trafficlight.setProgramLogic(self.id, logic)
-
         self.signals: List[Signal] = None  # Used to allow signal sharing
         self.full_observation: FullObservation = FullObservation()
 
-    def build_config(self, myconfig):  
+        # build the internal state of the signal
+        self._timer = _SignalTimer(min_yellow=yellow_length, min_green=min_green)
+
+        # sub to the lanes
+        self._sub_lane_info()
+
+        # set the phase equal to the first phase
+        self._phase: int = self.sumo.trafficlight.getPhase(self.id)
+
+    def _sub_lane_info(
+        self,
+    ) -> None:
+        for lane in self.lanes:
+            self.sumo.lane.subscribe(lane, self.SUBSCRIPTIONS["lane"])
+
+    def build_config(self, myconfig):
         # sourcery skip: low-code-quality, raise-specific-error
         if self.id not in myconfig:
             raise NotImplementedError(f"{self.id} should be in configuration")
@@ -202,110 +305,49 @@ class Signal:
         for key in self.lane_sets_outbound:  # Remove duplicates
             self.lane_sets_outbound[key] = list(set(self.lane_sets_outbound[key]))
 
-    # def generate_config(self):
-    #     print("GENERATING CONFIG")
-    #     # TODO raise Exception('Invalid signal config')
-    #     index_to_movement = {
-    #         0: "S-W",
-    #         1: "S-S",
-    #         2: "S-E",
-    #         3: "W-N",
-    #         4: "W-W",
-    #         5: "W-S",
-    #         6: "N-E",
-    #         7: "N-N",
-    #         8: "N-W",
-    #         9: "E-S",
-    #         10: "E-E",
-    #         11: "E-N",
-    #     }
-    #     self.lane_sets = {movement: [] for movement in index_to_movement.values()}
-    #     self.lane_sets_outbound = {}
-    #     self.downstream = {"N": None, "E": None, "S": None, "W": None}
-
-    #     links = self.sumo.trafficlight.getControlledLinks(self.id)
-    #     # print(self.id, links)
-    #     for i, link in enumerate(links):
-    #         link = link[0]  # unpack so link[0] is inbound, link[1] outbound
-    #         if link[0] not in self.lanes:
-    #             self.lanes.append(link[0])
-    #         # Group of lanes constituting a direction of traffic
-    #         if i % 3 == 0:
-    #             index = int(i / 3)
-    #             self.lane_sets[index_to_movement[index]].append(link[0])
-    #     # print(self.id, self.lane_sets)
-    #     """split = self.lane_sets['S-W'][0].split('_')[0]
-    #     if 'np' not in split: self.downstream['N'] = split
-    #     split = self.lane_sets['W-N'][0].split('_')[0]
-    #     if 'np' not in split: self.downstream['E'] = split
-    #     split = self.lane_sets['N-E'][0].split('_')[0]
-    #     if 'np' not in split: self.downstream['S'] = split
-    #     split = self.lane_sets['E-S'][0].split('_')[0]
-    #     if 'np' not in split: self.downstream['W'] = split"""
-    #     lane = self.lane_sets["S-S"][0]
-    #     fr_sig = re.findall("[a-zA-Z]+[0-9]+", lane)[0]
-    #     fringes, isfringe = ["top", "right", "left", "bottom"], False
-    #     for fringe in fringes:
-    #         if fringe in fr_sig:
-    #             isfringe = True
-    #     if not isfringe:
-    #         self.downstream["N"] = fr_sig
-
-    #     lane = self.lane_sets["N-N"][0]
-    #     fr_sig = re.findall("[a-zA-Z]+[0-9]+", lane)[0]
-    #     fringes, isfringe = ["top", "right", "left", "bottom"], False
-    #     for fringe in fringes:
-    #         if fringe in fr_sig:
-    #             isfringe = True
-    #     if not isfringe:
-    #         self.downstream["S"] = fr_sig
-
-    #     lane = self.lane_sets["W-W"][0]
-    #     fr_sig = re.findall("[a-zA-Z]+[0-9]+", lane)[0]
-    #     fringes, isfringe = ["top", "right", "left", "bottom"], False
-    #     for fringe in fringes:
-    #         if fringe in fr_sig:
-    #             isfringe = True
-    #     if not isfringe:
-    #         self.downstream["E"] = fr_sig
-
-    #     lane = self.lane_sets["E-E"][0]
-    #     fr_sig = re.findall("[a-zA-Z]+[0-9]+", lane)[0]
-    #     fringes, isfringe = ["top", "right", "left", "bottom"], False
-    #     for fringe in fringes:
-    #         if fringe in fr_sig:
-    #             isfringe = True
-    #     if not isfringe:
-    #         self.downstream["W"] = fr_sig
-    #     print("'" + self.id + "'" + ": {")
-    #     print("'lane_sets':" + str(self.lane_sets) + ",")
-    #     print("'downstream':" + str(self.downstream) + "},")
-
-    # print(self.id)
-    # print(self.sumo.trafficlight.getControlledLinks(self.id))
-    # print(self.lanes)
-    # print(self.outbound_lanes)
-    # print(self.lane_sets_outbound)
-
     @property
     def phase(self):
-        return self.sumo.trafficlight.getPhase(self.id)
+        return self._phase
 
-    def prep_phase(self, new_phase):
-        if self.phase == new_phase:
-            self.next_phase = self.phase
-        else:
-            self.next_phase = new_phase
-            key = f"{str(self.phase)}_{str(new_phase)}"
+    @phase.setter
+    def phase(self, value):
+        self._phase = value
+
+    def set_phase(self, time_: float, new_phase: int) -> None:
+        if not self._timer.okay_to_switch(time_):
+            # self.sumo.trafficlight.setPhase(self.id, self._phase)
+            return 
+
+        # should we allow a next phase override? (or is an action lasting)
+        self.next_phase = new_phase
+
+        if self._timer.state == LightState.GREEN:
+            if self._phase == new_phase:
+                # we are already in the right phase, have to write to the sumo
+                return self.sumo.trafficlight.setPhase(self.id, self._phase)
+            
+            # a yellow phase is needed
+            key = f"{str(self.phase)}_{self.next_phase}"
+            # not sure why this gaurd is here, what do we do if we don't have a yellow time?
             if key in self.yellow_dict:
                 yel_idx = self.yellow_dict[key]
                 self.sumo.trafficlight.setPhase(self.id, yel_idx)  # turns yellow
+                self._timer.update(time_)
 
-    def set_phase(self):
-        self.sumo.trafficlight.setPhase(self.id, int(self.next_phase))
+        else:
+            # we have to go to green
+            self.sumo.trafficlight.setPhase(self.id, self.next_phase)
+            self.phase = self.next_phase
+            self._timer.update(time_)
 
-    def observe(self, step_length, distance):
+    def observe(
+        self,
+        distance: float,
+        veh_observations: Dict[str, Any],
+        lane_observations: Dict[str, Any],
+    ) -> None:
         # full_observation = FullObservation()
+
         all_vehicles = set()
         for lane in self.lanes:
             lane_measures = LaneMeasures(
@@ -314,49 +356,44 @@ class Signal:
                 0,
                 0,
             )
-            for vehicle in self.get_vehicles(lane, distance):
-                all_vehicles.add(vehicle)
-                # Update waiting time
-                if vehicle in self.waiting_times:
-                    self.waiting_times[vehicle] += step_length
-                elif (
-                    self.sumo.vehicle.getWaitingTime(vehicle) > 0
-                ):  # Vehicle stopped here, add it
-                    self.waiting_times[vehicle] = self.sumo.vehicle.getWaitingTime(
-                        vehicle
+            for vehicle_id, vehicle_dict in self.filter_vehicles(
+                lane_observations[lane], distance, veh_observations
+            ):
+                all_vehicles.add(vehicle_id)
+                self.waiting_times[vehicle_id] = vehicle_dict.pop(tc.VAR_WAITING_TIME)
+                lane_measures.add_vehicle(
+                    VehicleMeasures(
+                        id=vehicle_id,
+                        wait=(
+                            self.waiting_times[vehicle_id]
+                            if vehicle_id in self.waiting_times
+                            else 0
+                        ),
+                        speed=vehicle_dict.pop(tc.VAR_SPEED),
+                        acceleration=vehicle_dict.pop(tc.VAR_ACCELERATION),
+                        position=vehicle_dict.pop(tc.VAR_LANEPOSITION),
+                        type=vehicle_dict.pop(tc.VAR_TYPE),
+                        other=vehicle_dict,
                     )
-                veh = VehicleMeasures(
-                    id=vehicle,
-                    wait=(
-                        self.waiting_times[vehicle]
-                        if vehicle in self.waiting_times
-                        else 0
-                    ),
-                    speed=self.sumo.vehicle.getSpeed(vehicle),
-                    acceleration=self.sumo.vehicle.getAcceleration(vehicle),
-                    position=self.sumo.vehicle.getLanePosition(vehicle),
-                    type=self.sumo.vehicle.getTypeID(vehicle),
                 )
-
-                lane_measures.add_vehicle(veh)
 
             self.full_observation.lane_observations[lane] = lane_measures
 
         self.full_observation.update_vehicles(all_vehicles)
-
         # Clear departures from waiting times
         for vehicle in self.full_observation.departures:
             if vehicle in self.waiting_times:
                 self.waiting_times.pop(vehicle)
 
     # Remove undetectable vehicles from lane
-    def get_vehicles(self, lane, max_distance):
-        detectable = []
-        for vehicle in self.sumo.lane.getLastStepVehicleIDs(lane):
-            path = self.sumo.vehicle.getNextTLS(vehicle)
+    def filter_vehicles(
+        self, lane_dict: Dict[str, Any], max_distance: float, veh_dict: Dict[str, Any]
+    ) -> Iterable[Tuple[str, Dict]]:
+        for vehicle in lane_dict[tc.LAST_STEP_VEHICLE_ID_LIST]:
+            path = veh_dict[vehicle][tc.VAR_NEXT_TLS]
             if len(path) > 0:
                 next_light = path[0]
                 distance = next_light[2]
                 if distance <= max_distance:  # Detectors have a max range
-                    detectable.append(vehicle)
-        return detectable
+                    yield vehicle, veh_dict[vehicle]
+

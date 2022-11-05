@@ -1,82 +1,92 @@
-# import numpy as np
-# from resco_benchmark.agents.agent import SharedAgent, Agent
-# from resco_benchmark.config.signal_config import signal_configs
+import numpy as np
+
+from resco_benchmark.agents.agent import Agent, IndependentAgent, SharedAgent
+from resco_benchmark.config.signal_config import signal_configs
+from resco_benchmark.states import State
+
+class MINJUNG(SharedAgent):
+    def __init__(self, config, obs_act, map_name, thread_number):
+        super().__init__(config, obs_act, map_name, thread_number)
+        self.valid_acts = signal_configs[map_name]["valid_acts"]
+        self.agent = MinjugAgent(signal_configs[map_name]["phase_pairs"])
 
 
-# class MAXWAVE(SharedAgent):
-#     def __init__(self, config, obs_act, map_name, thread_number):
-#         super().__init__(config, obs_act, map_name, thread_number)
-#         self.valid_acts = signal_configs[map_name]['valid_acts']
-#         self.agent = WaveAgent(signal_configs[map_name]['phase_pairs'])
+class MinjugAgent(Agent):
+    """
+    TODO:
+    [ ] - Implement the act method
+        [x] - Get the desired observations
+        [ ] - Get the valid actions
+        [ ] - Get the reverse valid actions
 
+    Args:
+        WaveAgent (_type_): _description_
+    """
 
-# class WaveAgent(Agent):
-#     def __init__(self, phase_pairs):
-#         super().__init__()
-#         self.phase_pairs = phase_pairs
+    def __init__(self, phase_pairs):
+        super().__init__()
+        self._phase_pairs = phase_pairs
 
-#     def act(self, observations, valid_acts=None, reverse_valid=None):
-#         acts = []
-#         for i, observation in enumerate(observations):
-#             if valid_acts is None:
-#                 all_press = []
-#                 for pair in self.phase_pairs:
-#                     all_press.append(observation[pair[0]] + observation[pair[1]])
-#                 acts.append(np.argmax(all_press))
-#             else:
-#                 max_press, max_index = None, None
-#                 for idx in valid_acts[i]:
-#                     pair = self.phase_pairs[idx]
-#                     press = observation[pair[0]] + observation[pair[1]]
-#                     if max_press is None:
-#                         max_press = press
-#                         max_index = idx
-#                     if press > max_press:
-#                         max_press = press
-#                         max_index = idx
-#                 acts.append(valid_acts[i][max_index])
-#         return acts
+        phases = sorted({p for phase_pair in self._phase_pairs for p in phase_pair})
+        self._phase_to_index = {p: i for i, p in enumerate(phases)}
 
-#     def observe(self, observation, reward, done, info):
-#         pass
+        self._alpha = np.array([1. for _ in phases])
+        self._beta = np.array([1. for _ in phases])
+        self._gamma = np.array([1. for _ in phases])
 
-#     def save(self, path):
-#         pass
+    def update_weights(self, weights: np.ndarray):
+        # update th weights
+        self._alpha = weights[0]
+        self._beta = weights[1]
+        self._gamma = weights[2]
 
-# class MINJUNGAGENT(SharedAgent):
-#     def __init__(self, config, obs_act, map_name, thread_number):
-#         super().__init__(config, obs_act, map_name, thread_number)
-#         self.valid_acts = signal_configs[map_name]['valid_acts']
-#         self.agent = MaxAgent(signal_configs[map_name]['phase_pairs'])
+    def _compute_priority(self, phase_pair, observation):
+        """
+        Compute the priority of a phase pair given the observation.
 
+        Args:
+            phase_pair (tuple): The phase pair to compute the priority for
+            observation (State): The observation to compute the priority for
 
-# class MinjugAgent(WaveAgent):
-#     """
-#     TODO:
-#     [ ] - Implement the act method
-#         [ ] - Get the desired observations
-#         [ ] - Get the valid actions
-#         [ ] - Get the reverse valid actions
+        Returns:
+            float: The priority of the phase pair
+        """
+        alpha = self._alpha[self._phase_to_index[phase_pair[0]]] * observation[phase_pair[0]][0] \
+            + self._alpha[self._phase_to_index[phase_pair[1]]] * observation[phase_pair[1]][0]
+        beta = self._beta[self._phase_to_index[phase_pair[0]]] * observation[phase_pair[0]][1] \
+            + self._beta[self._phase_to_index[phase_pair[1]]] * observation[phase_pair[1]][1]
+        gamma = self._gamma[self._phase_to_index[phase_pair[0]]] + self._gamma[self._phase_to_index[phase_pair[1]]]
+        return alpha + beta + gamma
 
-#     Args:
-#         WaveAgent (_type_): _description_
-#     """
+    def act(self, observations: State, valid_acts=None, reverse_valid=None):
+        """
+        Handle the act method for the agent. Loop the valid phase pairs and get the
 
+        alpha * veh_speed_factor[p] + beta * 60 * accumulated_wtime[p] + 60 * gamma
+        """
+        # loop through the valid phase acts, get the alpha, beta, and gamma corresponding to the phase
+        acts = []
+        for i, observation in enumerate(observations):
+            if valid_acts is None:
+                acts.append(
+                    np.argmax(
+                        [
+                            self._compute_priority(phase_pair, observation)
+                            for phase_pair in self._phase_pairs
+                        ]
+                    )
+                )
+            else:
+                scores = [
+                    (ii, self._compute_priority(self._phase_pairs[idx], observation))
+                    for idx, ii in valid_acts[i].items()
+                ]
+                # append the valid act with the highest score
+                acts.append(max(scores, key=lambda x: x[1])[0])
+                # acts.append(valid_acts[i])
+                
+        return acts
 
-#     def act(self, observation, valid_acts=None, reverse_valid=None):
+    def observe(self, observation, reward, done, info):
+        pass
 
-
-#          sum(
-#                     _alpha * veh_speed_factor[p] + _beta * 60 * accumulated_wtime[p] + 60 * _gamma #Furuku normalization
-#                     for p in set(action)
-#                 )
-#                 for action, _alpha, _beta, _gamma in zip(
-#                     tl_actor.action_space, self.alpha[tls_ix], self.beta[tls_ix], self.gamma[tls_ix]
-#                 )
-#             ]
-#             """ Max added that you don't need below. Action space is sorted so that the first element is the optimal action """
-#             best_action = sorted(
-#                 zip(tl_actor.action_space, action_priority),
-#                 key=lambda x: x[1],
-#                 reverse=True,
-#             )[0][1]

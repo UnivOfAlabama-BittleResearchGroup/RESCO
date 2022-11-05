@@ -1,14 +1,35 @@
-from typing import Dict
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Union
+from collections import UserDict
 import numpy as np
 
+import traci.constants as tc
 from resco_benchmark.traffic_signal import Signal
 from resco_benchmark.config.mdp_config import mdp_configs
+from resco_benchmark.utils.traci_help import add_traci_subcriptions
 
 
-def drq(signals):
-    observations = {}
-    for signal_id in signals:
-        signal = signals[signal_id]
+# create a prototype for the return type of the state functions
+@dataclass
+class State:
+    """
+    A dataclass that holds the observations for each signal.
+    Can be used as a dictionary & extended in the future
+    """
+
+    observations: Dict[str, Union[Any, np.ndarray]] = field(default_factory=dict)
+
+    def __getitem__(self, key):
+        return self.observations[key]
+
+    def __setitem__(self, key, value):
+        self.observations[key] = value
+
+
+@add_traci_subcriptions({})
+def drq(signals: Dict[str, Signal]) -> State:
+    observations = State()
+    for signal_id, signal in signals.items():
         obs = []
         act_index = signal.phase
         for i, lane in enumerate(signal.lanes):
@@ -35,10 +56,10 @@ def drq(signals):
     return observations
 
 
-def drq_norm(signals):
-    observations = {}
-    for signal_id in signals:
-        signal = signals[signal_id]
+@add_traci_subcriptions({})
+def drq_norm(signals: Dict[str, Signal]) -> State:
+    observations = State()
+    for signal_id, signal in signals.items():
         obs = []
         act_index = signal.phase
         for i, lane in enumerate(signal.lanes):
@@ -65,10 +86,10 @@ def drq_norm(signals):
     return observations
 
 
-def mplight(signals):
+@add_traci_subcriptions({})
+def mplight(signals: Dict[str, Signal]) -> State:
     observations = {}
-    for signal_id in signals:
-        signal = signals[signal_id]
+    for signal_id, signal in signals.items():
         obs = [signal.phase]
         for direction in signal.lane_sets:
             # Add inbound
@@ -89,10 +110,10 @@ def mplight(signals):
     return observations
 
 
-def mplight_full(signals):
+@add_traci_subcriptions({})
+def mplight_full(signals: Dict[str, Signal]) -> State:
     observations = {}
-    for signal_id in signals:
-        signal = signals[signal_id]
+    for signal_id, signal in signals.items():
         obs = [signal.phase]
         for direction in signal.lane_sets:
             # Add inbound
@@ -121,7 +142,28 @@ def mplight_full(signals):
     return observations
 
 
-def wave(signals: Dict[str, Signal]):
+@add_traci_subcriptions({"vehicle": [tc.VAR_SPEED]})
+def minjung(signals: Dict[str, Signal]) -> State:
+    return {
+        signal_id: np.asarray(
+            [
+                (
+                    sum(
+                        veh.speed
+                        for _lane in lanes
+                        for veh in signal.full_observation[_lane].vehicles
+                    ),
+                    sum(signal.full_observation[_lane].total_wait for _lane in lanes),
+                )
+                for lanes in signal.lane_sets.values()
+            ]
+        )
+        for signal_id, signal in signals.items()
+    }
+
+
+@add_traci_subcriptions({})
+def wave(signals: Dict[str, Signal]) -> State:
     observations = {}
     for signal_id, signal in signals.items():
         state = []
@@ -131,18 +173,17 @@ def wave(signals: Dict[str, Signal]):
                 + signal.full_observation[lane].approach
                 for lane in signal.lane_sets[direction]
             )
-
             state.append(wave_sum)
         observations[signal_id] = np.asarray(state)
     return observations
 
 
-def ma2c(signals):
+@add_traci_subcriptions({})
+def ma2c(signals: Dict[str, Signal]) -> State:
     ma2c_config = mdp_configs["MA2C"]
 
     signal_wave = {}
-    for signal_id in signals:
-        signal = signals[signal_id]
+    for signal_id, signal in signals.items():
         waves = []
         for lane in signal.lanes:
             wave = (
@@ -173,15 +214,15 @@ def ma2c(signals):
     return observations
 
 
-def fma2c(signals):
+@add_traci_subcriptions({})
+def fma2c(signals: Dict[str, Signal]) -> State:
     fma2c_config = mdp_configs["FMA2C"]
     management = fma2c_config["management"]
     supervisors = fma2c_config["supervisors"]  # reverse of management
     management_neighbors = fma2c_config["management_neighbors"]
 
     region_fringes = {manager: [] for manager in management}
-    for signal_id in signals:
-        signal = signals[signal_id]
+    for signal_id, signal in signals.items():
         for key in signal.downstream:
             neighbor = signal.downstream[key]
             if neighbor is None or supervisors[neighbor] != supervisors[signal_id]:
@@ -246,19 +287,19 @@ def fma2c(signals):
         )
 
         observations[signal_id] = np.concatenate([waves, waits])
-    observations.update(management_neighborhood)
+    observations |= management_neighborhood
     return observations
 
 
-def fma2c_full(signals):
+@add_traci_subcriptions({})
+def fma2c_full(signals: Dict[str, Signal]) -> State:
     fma2c_config = mdp_configs["FMA2CFull"]
     management = fma2c_config["management"]
     supervisors = fma2c_config["supervisors"]  # reverse of management
     management_neighbors = fma2c_config["management_neighbors"]
 
     region_fringes = {manager: [] for manager in management}
-    for signal_id in signals:
-        signal = signals[signal_id]
+    for signal_id, signal in signals.items():
         for key in signal.downstream:
             neighbor = signal.downstream[key]
             if neighbor is None or supervisors[neighbor] != supervisors[signal_id]:
