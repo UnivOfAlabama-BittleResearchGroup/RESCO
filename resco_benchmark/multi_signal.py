@@ -1,3 +1,4 @@
+import contextlib
 import os
 from os import PathLike
 from typing import Dict, List, Set, Tuple
@@ -10,6 +11,7 @@ from resco_benchmark.traffic_signal import Signal
 
 
 class MultiSignal(gym.Env):
+
     def __init__(
         self,
         run_name: str,
@@ -349,9 +351,10 @@ class MultiSignal(gym.Env):
         pass
 
     def close(self):
-        if not self.libsumo:
-            traci.switch(self.connection_name)
-        traci.close()
+        with contextlib.suppress(traci.TraCIException):
+            if not self.libsumo:
+                traci.switch(self.connection_name)
+            traci.close()
         self.save_metrics()
 
     def get_total_reward(self):

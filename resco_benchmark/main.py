@@ -1,14 +1,15 @@
-import pathlib
 import os
 import multiprocessing as mp
-
+import argparse
 
 from multi_signal import MultiSignal
-import argparse
+
 from resco_benchmark.agents.agent import SharedAgent
 from resco_benchmark.config.agent_config import agent_configs
 from resco_benchmark.config.map_config import map_configs
 from resco_benchmark.config.mdp_config import mdp_configs
+from resco_benchmark.runners.default import mp_training_loop, training_loop
+from resco_benchmark.runners.ga import ga_optimizer
 
 
 def main():
@@ -62,6 +63,9 @@ def main():
     ap.add_argument(
         "--tr", type=int, default=0
     )  # Can't multi-thread with libsumo, provide a trial number
+    ap.add_argument(
+        "--ga", type=bool, default=False, 
+    )  # Can't multi-thread with libsumo, provide a trial number
     args = ap.parse_args()
 
     if args.libsumo and "LIBSUMO_AS_TRACI" not in os.environ:
@@ -70,132 +74,16 @@ def main():
         )
 
     if args.procs == 1 or args.libsumo:
-        run_trial(args, args.tr)
+        if args.ga:
+            ga_optimizer(args, args.tr)
+        else:
+            training_loop(args, args.tr)
     else:
-        pool = mp.Pool(processes=args.procs)
-        for trial in range(1, args.trials + 1):
-            pool.apply_async(run_trial, args=(args, trial))
-        pool.close()
-        pool.join()
+        mp_training_loop(args, args.tr)
 
 
-def run_trial(args, trial):
-    mdp_config = mdp_configs.get(args.agent)
-    if mdp_config is not None:
-        mdp_map_config = mdp_config.get(args.map)
-        if mdp_map_config is not None:
-            mdp_config = mdp_map_config
-        mdp_configs[args.agent] = mdp_config
-
-    agt_config = agent_configs[args.agent]
-    agt_map_config = agt_config.get(args.map)
-    if agt_map_config is not None:
-        agt_config = agt_map_config
-    alg = agt_config["agent"]
-
-    if mdp_config is not None:
-        agt_config["mdp"] = mdp_config
-        management = agt_config["mdp"].get("management")
-        if management is not None:  # Save some time and precompute the reverse mapping
-            supervisors = {}
-            for manager in management:
-                workers = management[manager]
-                for worker in workers:
-                    supervisors[worker] = manager
-            mdp_config["supervisors"] = supervisors
-
-    map_config = map_configs[args.map]
-    num_steps_eps = int(
-        (map_config["end_time"] - map_config["start_time"]) / map_config["step_length"]
-    )
-    route = map_config["route"]
-    if route is not None:
-        route = os.path.join(args.pwd, route)
-    if args.map in ["grid4x4", "arterial4x4"] and not os.path.exists(route):
-        raise EnvironmentError(
-            "You must decompress environment files defining traffic flow"
-        )
-
-    env = MultiSignal(
-        f"{alg.__name__}-tr{str(trial)}",
-        args.map,
-        os.path.join(args.pwd, map_config["net"]),
-        agt_config["state"],
-        agt_config["reward"],
-        route=route,
-        step_length=map_config["step_length"],
-        yellow_length=map_config["yellow_length"],
-        step_ratio=map_config["step_ratio"],
-        end_time=map_config["end_time"],
-        max_distance=agt_config["max_distance"],
-        lights=map_config["lights"],
-        gui=args.gui,
-        log_dir=args.log_dir,
-        libsumo=args.libsumo,
-        warmup=map_config["warmup"],
-    )
-
-    agt_config["episodes"] = int(args.eps * 0.8)  # schedulers decay over 80% of steps
-    agt_config["steps"] = agt_config["episodes"] * num_steps_eps
-    agt_config["log_dir"] = os.path.join(args.log_dir, env.connection_name)
-    agt_config["num_lights"] = len(env.all_ts_ids)
-
-    # Get agent id's, observation shapes, and action sizes from env
-    obs_act = {
-        key: [
-            env.obs_shape[key],
-            len(env.phases[key]) if key in env.phases else None,
-        ]
-        for key in env.obs_shape
-    }
-
-    agent = alg(agt_config, obs_act, args.map, trial)
-
-    for _ in range(args.eps):
-        obs = env.reset()
-        done = False
-        while not done:
-            act = agent.act(obs)
-            obs, rew, done, info = env.step(act)
-            agent.observe(obs, rew, done, info)
-    env.close()
 
 
-def ga_optimizer(
-    agent: SharedAgent, env: MultiSignal, args: argparse.Namespace
-) -> None:
-
-    import pygad
-
-    def fitness_func(solution, solution_idx):
-        agent.set_weights(solution)
-        obs = env.reset()
-        done = False
-        while not done:
-            act = agent.act(obs)
-            obs, rew, done, info = env.step(act)
-            agent.observe(obs, rew, done, info)
-        return env.get_total_reward()
-
-    ga_instance = pygad.GA(
-        num_generations=args.generations,
-        num_parents_mating=args.parents,
-        initial_population=agent.get_weights(),
-        fitness_func=fitness_func,
-        sol_per_pop=args.population,
-        num_genes=agent.get_num_weights(),
-        mutation_percent_genes=args.mutation,
-        parent_selection_type="sss",
-        crossover_type="single_point",
-        mutation_type="random",
-        mutation_by_replacement=True,
-        keep_parents=args.parents,
-        on_generation=env.on_generation,
-        on_start=env.on_start,
-        on_finish=env.on_finish,
-    )
-
-    ga_instance.run()
 
 
 if __name__ == "__main__":

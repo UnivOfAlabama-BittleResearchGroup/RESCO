@@ -4,11 +4,23 @@ from resco_benchmark.agents.agent import Agent, IndependentAgent, SharedAgent
 from resco_benchmark.config.signal_config import signal_configs
 from resco_benchmark.states import State
 
-class MINJUNG(SharedAgent):
+
+class MINJUNG(IndependentAgent):
     def __init__(self, config, obs_act, map_name, thread_number):
         super().__init__(config, obs_act, map_name, thread_number)
-        self.valid_acts = signal_configs[map_name]["valid_acts"]
-        self.agent = MinjugAgent(signal_configs[map_name]["phase_pairs"])
+        self.agents = {
+            agent_id: MinjugAgent(signal_configs[map_name]["phase_pairs"])
+            for agent_id in obs_act
+        }
+
+    def ga_set_params(self, weights):
+        for agent in self.agents.values():
+            agent.ga_set_params(weights[: agent.ga_nvars])
+            weights = weights[agent.ga_dimensions :]
+
+    @property
+    def ga_nvars(self):
+        return sum(agent.ga_nvars for agent in self.agents.values())
 
 
 class MinjugAgent(Agent):
@@ -30,15 +42,17 @@ class MinjugAgent(Agent):
         phases = sorted({p for phase_pair in self._phase_pairs for p in phase_pair})
         self._phase_to_index = {p: i for i, p in enumerate(phases)}
 
-        self._alpha = np.array([1. for _ in phases])
-        self._beta = np.array([1. for _ in phases])
-        self._gamma = np.array([1. for _ in phases])
+        self._alpha = np.array([1.0 for _ in phases])
+        self._beta = np.array([1.0 for _ in phases])
+        self._gamma = np.array([1.0 for _ in phases])
 
-    def update_weights(self, weights: np.ndarray):
+    @property
+    def ga_nvars(self):
+        return self._alpha.shape[0] + self._beta.shape[0] + self._gamma.shape[0]
+
+    def ga_set_params(self, weights: np.ndarray):
         # update th weights
-        self._alpha = weights[0]
-        self._beta = weights[1]
-        self._gamma = weights[2]
+        self._gamma, self._beta, self._gamma = weights.reshape((3, -1))
 
     def _compute_priority(self, phase_pair, observation):
         """
@@ -51,11 +65,22 @@ class MinjugAgent(Agent):
         Returns:
             float: The priority of the phase pair
         """
-        alpha = self._alpha[self._phase_to_index[phase_pair[0]]] * observation[phase_pair[0]][0] \
-            + self._alpha[self._phase_to_index[phase_pair[1]]] * observation[phase_pair[1]][0]
-        beta = self._beta[self._phase_to_index[phase_pair[0]]] * observation[phase_pair[0]][1] \
-            + self._beta[self._phase_to_index[phase_pair[1]]] * observation[phase_pair[1]][1]
-        gamma = self._gamma[self._phase_to_index[phase_pair[0]]] + self._gamma[self._phase_to_index[phase_pair[1]]]
+        alpha = (
+            self._alpha[self._phase_to_index[phase_pair[0]]]
+            * observation[phase_pair[0]][0]
+            + self._alpha[self._phase_to_index[phase_pair[1]]]
+            * observation[phase_pair[1]][0]
+        )
+        beta = (
+            self._beta[self._phase_to_index[phase_pair[0]]]
+            * observation[phase_pair[0]][1]
+            + self._beta[self._phase_to_index[phase_pair[1]]]
+            * observation[phase_pair[1]][1]
+        )
+        gamma = (
+            self._gamma[self._phase_to_index[phase_pair[0]]]
+            + self._gamma[self._phase_to_index[phase_pair[1]]]
+        )
         return alpha + beta + gamma
 
     def act(self, observations: State, valid_acts=None, reverse_valid=None):
@@ -84,9 +109,8 @@ class MinjugAgent(Agent):
                 # append the valid act with the highest score
                 acts.append(max(scores, key=lambda x: x[1])[0])
                 # acts.append(valid_acts[i])
-                
+
         return acts
 
     def observe(self, observation, reward, done, info):
         pass
-

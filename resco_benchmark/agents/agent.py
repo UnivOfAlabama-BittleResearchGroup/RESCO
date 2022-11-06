@@ -18,6 +18,7 @@ class IndependentAgent(Agent):
         super().__init__()
         self.config = config
         self.agents = {}
+        # save the observation and action space for each agent
 
     def act(self, observation):
         return {
