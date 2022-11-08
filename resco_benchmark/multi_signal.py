@@ -358,4 +358,4 @@ class MultiSignal(gym.Env):
         self.save_metrics()
 
     def get_total_reward(self):
-        return sum(metric['reward'] for metric in self.metrics)
+        return sum(r for metric in self.metrics for r in metric['reward'].values())

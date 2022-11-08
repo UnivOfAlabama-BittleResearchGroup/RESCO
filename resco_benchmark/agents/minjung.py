@@ -16,7 +16,7 @@ class MINJUNG(IndependentAgent):
     def ga_set_params(self, weights):
         for agent in self.agents.values():
             agent.ga_set_params(weights[: agent.ga_nvars])
-            weights = weights[agent.ga_dimensions :]
+            weights = weights[agent.ga_nvars :]
 
     @property
     def ga_nvars(self):
@@ -89,28 +89,15 @@ class MinjugAgent(Agent):
 
         alpha * veh_speed_factor[p] + beta * 60 * accumulated_wtime[p] + 60 * gamma
         """
-        # loop through the valid phase acts, get the alpha, beta, and gamma corresponding to the phase
-        acts = []
-        for i, observation in enumerate(observations):
-            if valid_acts is None:
-                acts.append(
-                    np.argmax(
-                        [
-                            self._compute_priority(phase_pair, observation)
-                            for phase_pair in self._phase_pairs
-                        ]
-                    )
-                )
-            else:
-                scores = [
-                    (ii, self._compute_priority(self._phase_pairs[idx], observation))
-                    for idx, ii in valid_acts[i].items()
-                ]
-                # append the valid act with the highest score
-                acts.append(max(scores, key=lambda x: x[1])[0])
-                # acts.append(valid_acts[i])
+        if valid_acts is None:
+            return np.argmax([self._compute_priority(phase_pair, observations) for phase_pair in self._phase_pairs])
 
-        return acts
+        scores = [
+            (ii, self._compute_priority(self._phase_pairs[idx], observations))
+            for idx, ii in valid_acts.items()
+        ]
+            # append the valid act with the highest score
+        return max(scores, key=lambda x: x[1])[0]
 
     def observe(self, observation, reward, done, info):
         pass
