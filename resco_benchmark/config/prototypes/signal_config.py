@@ -55,8 +55,7 @@ class Downstream:
         return Downstream(n, e, s, w)
 
     def to_dict(self) -> dict:
-        result: dict = {}
-        result["N"] = from_str(self.n)
+        result: dict = {"N": from_str(self.n)}
         result["E"] = from_str(str(self.e))
         result["S"] = from_str(self.s)
         result["W"] = from_str(self.w)
@@ -76,37 +75,36 @@ class TrafficSignal:
         return TrafficSignal(lane_sets, downstream)
 
     def to_dict(self) -> dict:
-        result: dict = {}
-        result["lane_sets"] = from_dict(lambda x: from_list(from_str, x), self.lane_sets)
+        result: dict = {"lane_sets": from_dict(lambda x: from_list(from_str, x), self.lane_sets)}
+
         result["downstream"] = to_class(Downstream, self.downstream)
         return result
 
 
 @dataclass
-class NetworkConfig:
+class SignalNetworkConfig:
     phase_pairs: List[int]
     valid_acts: Dict[str, Dict[str, int]]
     traffic_signals: Dict[str, TrafficSignal]
 
     @staticmethod
-    def from_dict(obj: Any) -> 'NetworkConfig':
+    def from_dict(obj: Any) -> 'SignalNetworkConfig':
         assert isinstance(obj, dict)
         phase_pairs = from_list(from_int, obj.get("phase_pairs"))
         valid_acts = from_dict(lambda x: from_dict(from_int, x), obj.get("valid_acts"))
         traffic_signals = from_dict(TrafficSignal.from_dict, obj.get("traffic_signals"))
-        return NetworkConfig(phase_pairs, valid_acts, traffic_signals)
+        return SignalNetworkConfig(phase_pairs, valid_acts, traffic_signals)
 
     def to_dict(self) -> dict:
-        result: dict = {}
-        result["phase_pairs"] = from_list(from_int, self.phase_pairs)
+        result: dict = {"phase_pairs": from_list(from_int, self.phase_pairs)}
         result["valid_acts"] = from_dict(lambda x: from_dict(from_int, x), self.valid_acts)
         result["traffic_signals"] = from_dict(lambda x: to_class(TrafficSignal, x), self.traffic_signals)
         return result
 
 
-def network_config_from_dict(s: Any) -> NetworkConfig:
-    return NetworkConfig.from_dict(s)
+def network_config_from_dict(s: Any) -> SignalNetworkConfig:
+    return SignalNetworkConfig.from_dict(s)
 
 
-def network_config_to_dict(x: NetworkConfig) -> Any:
-    return to_class(NetworkConfig, x)
+def network_config_to_dict(x: SignalNetworkConfig) -> Any:
+    return to_class(SignalNetworkConfig, x)

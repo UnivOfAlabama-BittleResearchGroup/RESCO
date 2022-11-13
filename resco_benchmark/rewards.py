@@ -10,6 +10,13 @@ from resco_benchmark.traffic_signal import Signal
 from resco_benchmark.utils.traci_help import add_traci_subcriptions
 
 
+
+# create a prototype for the reward function
+def reward_function(signals: List[Signal]) -> Dict[str, float]:
+    return {signal.id: 0.0 for signal in signals}
+
+
+
 @add_traci_subcriptions({"vehicle": [tc.VAR_FUELCONSUMPTION]})
 def fuel_consumption(signals: List[Signal]):
     rewards = {}

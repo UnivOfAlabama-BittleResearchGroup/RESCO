@@ -24,6 +24,14 @@ class State:
 
     def __setitem__(self, key, value):
         self.observations[key] = value
+    
+
+# create a prototype of the function
+def state_function(signals: Dict[str, Signal]) -> State:
+    """
+    A function that takes in a dictionary of signals and returns a State object
+    """
+    pass
 
 
 @add_traci_subcriptions({})
