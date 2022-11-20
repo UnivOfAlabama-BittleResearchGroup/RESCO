@@ -1,13 +1,7 @@
 import os
-import multiprocessing as mp
 import argparse
 
-from multi_signal import MultiSignal
 
-from resco_benchmark.agents.agent import SharedAgent
-from resco_benchmark.config.agent_config import agent_configs
-from resco_benchmark.config.map_config import map_configs
-from resco_benchmark.config.mdp_config import mdp_configs
 from resco_benchmark.runners.default import mp_training_loop, training_loop
 from resco_benchmark.runners.ga import ga_optimizer
 
@@ -65,7 +59,10 @@ def main():
     )  # Can't multi-thread with libsumo, provide a trial number
     ap.add_argument(
         "--ga", type=bool, default=False, 
-    )  # Can't multi-thread with libsumo, provide a trial number
+    )
+    ap.add_argument(
+        "--n_workers", type=int, default=0,
+    )
     args = ap.parse_args()
 
     if args.libsumo and "LIBSUMO_AS_TRACI" not in os.environ:
@@ -73,11 +70,14 @@ def main():
             "Set LIBSUMO_AS_TRACI to nonempty value to enable libsumo"
         )
 
+    if args.procs < 0:
+        args.procs = os.cpu_count()
+
+    if args.ga:
+        ga_optimizer(args, args.tr)
+
     if args.procs == 1 or args.libsumo:
-        if args.ga:
-            ga_optimizer(args, args.tr)
-        else:
-            training_loop(args, args.tr)
+        training_loop(args, args.tr)
     else:
         mp_training_loop(args, args.tr)
 

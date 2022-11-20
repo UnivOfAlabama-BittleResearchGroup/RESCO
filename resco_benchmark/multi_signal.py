@@ -1,69 +1,98 @@
 import contextlib
 import os
 from os import PathLike
+import re
 from typing import Dict, List, Set, Tuple
 import numpy as np
 import traci
-import traci.constants as tc
 import sumolib
 import gym
+
+from resco_benchmark.config.prototypes import SignalNetworkConfig
+from resco_benchmark.config.prototypes import MapConfig
+from resco_benchmark.config.prototypes import AgentConfig
 from resco_benchmark.traffic_signal import Signal
 
 
-class MultiSignal(gym.Env):
+def find_net(file: PathLike) -> Tuple[PathLike, PathLike]:
+    """
+    Find the net file
 
+    Args:
+        file (PathLike): Path to the net file (or config file)
+    Returns:
+        PathLike: Path to the net file
+        PathLike: Path to the config file
+    """
+    # try to parse it with sumolib. If it fails, it is not a net file
+    n = sumolib.net.readNet(file)
+    if n.getEdges():
+        return file, None
+    # if it is a config file, try to find the net file
+    with open(file, "r") as f:
+        regex = r"<net-file value=\"(\w+.+)\""
+        for line in f:
+            if match := re.search(regex, line):
+                # if the match is relative, make it absolute
+                return (
+                    (match[1], file)
+                    if os.path.isabs(match[1])
+                    else (os.path.join(os.path.dirname(file), match[1]), file)
+                )
+
+    raise FileNotFoundError("Net file not found")
+
+
+class MultiSignal(gym.Env):
     def __init__(
         self,
         run_name: str,
         map_name: str,
         net: str,
-        state_fn: Tuple[callable, Dict[str, int]],
-        reward_fn: Tuple[callable, Dict[str, int]],
-        route: str = None,
+        agent_config: AgentConfig,
+        map_config: MapConfig,
+        signal_config: SignalNetworkConfig,
         gui: bool = False,
-        end_time: float = 3600,
-        step_length: float = 10,
-        yellow_length: float = 4,
-        step_ratio: int = 1,
-        max_distance: float = 200,
-        lights: Tuple[str] = (),
         log_dir: PathLike = "/",
         libsumo: bool = False,
-        warmup: float = 0,
         gymma: bool = False,
-        min_green: float = None,
     ):
         self.libsumo = libsumo
         self.gymma = (
             gymma  # gymma expects sequential list of states/rewards instead of dict
         )
-        print(map_name, net, state_fn[0].__name__, reward_fn[0].__name__)
+        print(map_name, net, agent_config.state.__name__, agent_config.reward.__name__)
         self.log_dir = log_dir
-        self.net = net
-        self.route = route
+
+        # regex to find <net-file value="cologne3.net.xml"/> in an xml file
+
+        self.net, self.sumo_config = find_net(net)
+        self.route = map_config.route
         self.gui = gui
-        self.state_fn, self.state_subs = state_fn
         
-        self.max_distance = max_distance
-        self.warmup = warmup
+        self.state_fn = agent_config.state
+        self.state_subs = agent_config.state_subscriptions
+        self.signal_config = signal_config
+
+        self.max_distance = agent_config.max_distance
+        self.warmup = map_config.warmup
 
         # create the reward function and update the subscriptions
-        self.reward_fn, self.reward_subs = reward_fn
+        self.reward_fn = agent_config.reward
+        self.reward_subs = agent_config.reward_subscriptions
 
-        self.end_time = end_time
-        self.step_length = step_length
+        self.end_time = map_config.end_time
+        self.step_length = map_config.step_length
 
         # TODO: both yellow length and min green should be customizable per signal (and really per phase)
-        self.yellow_length = yellow_length
-        self.min_green = min_green or step_length
+        self.yellow_length = map_config.yellow_length
+        self.min_green = map_config.get("min_green", 0)
 
         # sourcery skip: remove-unnecessary-cast
-        self.step_ratio = int(step_ratio)
-        self.connection_name = (
-            f"{run_name}-{map_name}---{self.state_fn.__name__}-{self.reward_fn.__name__}"
-        )
+        self.step_ratio = map_config.get("step_ratio", 1)
+        self.connection_name = f"{run_name}-{map_name}---{self.state_fn.__name__}-{self.reward_fn.__name__}"
 
-        self.all_ts_ids = lights
+        self.all_ts_ids = map_config.lights
         self.map_name = map_name
 
         self.signal_ids: List[str] = []
@@ -77,35 +106,24 @@ class MultiSignal(gym.Env):
         self.metrics = []
         self.wait_metric = {}
 
-        if self.route is not None:
-            sumo_cmd = [
-                sumolib.checkBinary("sumo"),
-                "-n",
-                net,
-                "-r",
-                f"{self.route}_1.rou.xml",
-                "--no-warnings",
-                "True",
-            ]
 
-        else:
-            sumo_cmd = [sumolib.checkBinary("sumo"), "-c", net, "--no-warnings", "True"]
-
-        # Start sumo, so that we can detect the phases
-        self.connect_sumo(sumo_cmd)
-        # Run some steps in the simulation with default light configurations to detect phases
-        self._init_phases()
+        net = sumolib.net.readNet(self.net, withPrograms=True)
+        self._init_phases(net=net)
 
         # deduce the step length via the initial connection
-        self._sumo_step_length: float = self.sumo.simulation.getDeltaT()
+        self._sumo_step_length: float = 0
         self._sumo_time: float = 0  # store the internal sumo time
 
         # Pull signal observation shapes
-        self._init_agents(self.all_ts_ids, self.reward_subs, self.state_subs)
+        self._init_agents(
+            self.all_ts_ids, 
+            self.reward_subs, 
+            self.state_subs, 
+            self.signal_config, 
+            net
+        )
 
-        self._disconnect_sumo()
-
-        self.connection_name = f"{run_name}-{map_name}-{len(lights)}-{self.state_fn.__name__}-{self.reward_fn.__name__}"
+        self.connection_name = f"{run_name}-{map_name}-{len(self.signal_ids)}-{self.state_fn.__name__}-{self.reward_fn.__name__}"
 
         if not os.path.exists(log_dir + self.connection_name):
             os.makedirs(log_dir + self.connection_name)
@@ -113,23 +131,29 @@ class MultiSignal(gym.Env):
         self.sumo_cmd = None
         print("Connection ID", self.connection_name)
 
-
     def _disconnect_sumo(self):
         if not self.libsumo:
             traci.switch(self.connection_name)
         traci.close()
 
-    def _init_agents(self, signal_ids, reward_subs: Dict[str, int], state_subs: Dict[str, int]):
+    def _init_agents(
+        self,
+        signal_ids,
+        reward_subs: Dict[str, int],
+        state_subs: Dict[str, int],
+        signal_config: SignalNetworkConfig,
+        net: sumolib.net.Net
+    ):
+        # TODO: redo this without opening SUMO the first time!!!
         self.signals = {
             signal_id: Signal(
-                map_name=self.map_name,
-                sumo=self.sumo,
                 id=signal_id,
                 yellow_length=self.yellow_length,
                 min_green=self.min_green,  # this is a current limitation, need this to be a env parameter
-                phases=self.phases[signal_id],
+                phases=self.signal_config.traffic_signals[signal_id].phases,
                 reward_subscriptions=reward_subs,
                 state_subscriptions=state_subs,
+                signal_configs=signal_config,
             )
             for signal_id in signal_ids
         }
@@ -140,54 +164,40 @@ class MultiSignal(gym.Env):
             veh_subs.extend(signal.SUBSCRIPTIONS["vehicle"])
         self.vehicle_subscriptions = set(veh_subs)
 
-        # step the simulation to get the initial state
-        lane_dict, veh_dict = self.step_sim()
-
-        for ts in signal_ids:
-            self.signals[
-                ts
-            ].signals = (
-                self.signals
-            )  # pass all signals to each signal, in the case of multi-agent
-            self.signals[ts].observe( 
-                self.max_distance,
-                veh_observations=veh_dict,
-                lane_observations=lane_dict,
-            )  # observe the state of the signal
+        # observe the signal state 
+        for signal in self.signals.values():
+            signal.observation_dry_run()
 
         observations = self.state_fn(self.signals)
+        
         self.ts_order = []
-
         for ts in observations:
             if ts in ["top_mgr", "bot_mgr"]:
                 continue  # Not a traffic signal
-            o_shape = observations[ts].shape
-            self.obs_shape[ts] = o_shape
-            o_shape = gym.spaces.Box(low=-np.inf, high=np.inf, shape=o_shape)
+            self.obs_shape[ts] = observations[ts].shape
             self.ts_order.append(ts)
-            self.observation_space.append(o_shape)
-            self.action_space.append(gym.spaces.Discrete(len(self.phases[ts])))
+            self.observation_space.append(gym.spaces.Box(low=-np.inf, high=np.inf, shape=self.obs_shape[ts]))
+            self.action_space.append(gym.spaces.Discrete(len(self.signals[ts].phases)))
 
     def _init_phases(
         self,
+        net: sumolib.net.Net,
     ):
 
-        self.signal_ids = self.sumo.trafficlight.getIDList()
-        print("lights", len(self.signal_ids), self.signal_ids)
+        # try this with sumolib
+        self.all_ts_ids = [ts.getID() for ts in net.getTrafficLights()]
+        for ts in self.signal_config.traffic_signals:
+            tl_progs = net.getTLS(ts).getPrograms()
+            for program in tl_progs.values():
+                self.signal_config.traffic_signals[ts].set_phases(
+                    [
+                        phase
+                        for phase in program.getPhases()
+                        if "y" not in phase.state and "g" in phase.state.lower()
+                    ]
+                )
+                break
 
-        # this should work on all SUMO versions
-        self.phases = {
-            lightID: [
-                p
-                for p in self.sumo.trafficlight.getAllProgramLogics(lightID)[
-                    0
-                ].getPhases()
-                if "y" not in p.state and "g" in p.state.lower()
-            ]
-            for lightID in self.signal_ids
-        }
-
-        self.all_ts_ids = self.all_ts_ids or self.sumo.trafficlight.getIDList()
         self.ts_starter = len(self.all_ts_ids)
         self.n_agents = self.ts_starter
 
@@ -208,9 +218,12 @@ class MultiSignal(gym.Env):
         # subscribe to all new vehicles in the network
         for veh in self.sumo.simulation.getDepartedIDList():
             self.sumo.vehicle.subscribe(veh, self.vehicle_subscriptions)
-        
+
         # return the lane & vehicle observations
-        return self.sumo.lane.getAllSubscriptionResults(), self.sumo.vehicle.getAllSubscriptionResults()
+        return (
+            self.sumo.lane.getAllSubscriptionResults(),
+            self.sumo.vehicle.getAllSubscriptionResults(),
+        )
 
     def reset(self):
 
@@ -231,7 +244,7 @@ class MultiSignal(gym.Env):
         if self.route is not None:
             self.sumo_cmd += ["-n", self.net, "-r", f"{self.route}_{self.run}.rou.xml"]
         else:
-            self.sumo_cmd += ["-c", self.net]
+            self.sumo_cmd += ["-c", self.sumo_config]
         self.sumo_cmd += [
             "--random",
             "--time-to-teleport",
@@ -253,16 +266,30 @@ class MultiSignal(gym.Env):
         else:
             traci.start(self.sumo_cmd, label=self.connection_name)
             self.sumo = traci.getConnection(self.connection_name)
+        
+        # reset the signals
+        for signal in self.signals.values():
+            signal.reintialize(self.sumo)
 
-        for _ in range(self.warmup):
-            self.step_sim()
+        self._sumo_step_length = self.sumo.simulation.getDeltaT()
+
+        # add one to get the initial observations, even though we haven't stepped yet
+        for _ in range(self.warmup + 1):
+            lane_obs, vehicle_obs = self.step_sim()
+        
 
         # 'Start' only signals set for control, rest run fixed controllers
         if self.run % 30 == 0 and self.ts_starter < len(self.all_ts_ids):
             self.ts_starter += 1
         self.signal_ids = [self.all_ts_ids[i] for i in range(self.ts_starter)]
 
-        self._init_agents(self.signal_ids, self.reward_subs, self.state_subs)
+        # observe the last step
+        for signal in self.signal_ids:
+            self.signals[signal].observe(
+                self.max_distance,
+                veh_observations=vehicle_obs,
+                lane_observations=lane_obs,
+            )
 
         if self.gymma:
             states = self.state_fn(self.signals)
@@ -358,4 +385,23 @@ class MultiSignal(gym.Env):
         self.save_metrics()
 
     def get_total_reward(self):
-        return sum(r for metric in self.metrics for r in metric['reward'].values())
+        return sum(r for metric in self.metrics for r in metric["reward"].values())
+
+    @property
+    def gym_shape(self):
+        """
+        Returns the shape of the observation space for each traffic signal,
+        plus the number of phases
+
+        Returns
+        -------
+        dict
+            A dictionary with the shape of the observation space for each traffic signal
+        """
+        return {
+            key: [
+                self.obs_shape[key],
+                len(self.signals[key].phases) if key in self.signals else None,
+            ]
+            for key in self.obs_shape
+        }

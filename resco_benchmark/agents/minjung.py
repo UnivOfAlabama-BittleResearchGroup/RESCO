@@ -1,16 +1,23 @@
 import numpy as np
 
 from resco_benchmark.agents.agent import Agent, IndependentAgent, SharedAgent
-from resco_benchmark.config.signal_config import signal_configs
-from resco_benchmark.states import State
+from resco_benchmark.states.states import State
+from resco_benchmark.config.prototypes import SignalNetworkConfig, TrafficSignal
 
 
 class MINJUNG(IndependentAgent):
-    def __init__(self, config, obs_act, map_name, thread_number):
+    def __init__(
+        self,
+        config: SignalNetworkConfig,
+        obs_act: dict,
+        map_name: str,
+        thread_number: int,
+    ):
+
         super().__init__(config, obs_act, map_name, thread_number)
+
         self.agents = {
-            agent_id: MinjugAgent(signal_configs[map_name]["phase_pairs"])
-            for agent_id in obs_act
+            agent_id: MinjugAgent(agent_id, config.traffic_signals[agent_id]) for agent_id in obs_act
         }
 
     def ga_set_params(self, weights):
@@ -26,20 +33,21 @@ class MINJUNG(IndependentAgent):
 class MinjugAgent(Agent):
     """
     TODO:
-    [ ] - Implement the act method
+    [x] - Implement the act method
         [x] - Get the desired observations
-        [ ] - Get the valid actions
-        [ ] - Get the reverse valid actions
+        [x] - Get the valid actions
 
     Args:
         WaveAgent (_type_): _description_
     """
 
-    def __init__(self, phase_pairs):
+    def __init__(self, agent_id, signal_config: TrafficSignal):
         super().__init__()
-        self._phase_pairs = phase_pairs
+        self._agent_id = agent_id
 
-        phases = sorted({p for phase_pair in self._phase_pairs for p in phase_pair})
+        self._phase_pairs = signal_config.phase_pairs 
+
+        phases = sorted({p for phase_pair in self._phase_pairs for p in phase_pair[0]})
         self._phase_to_index = {p: i for i, p in enumerate(phases)}
 
         self._alpha = np.array([1.0 for _ in phases])
@@ -89,14 +97,12 @@ class MinjugAgent(Agent):
 
         alpha * veh_speed_factor[p] + beta * 60 * accumulated_wtime[p] + 60 * gamma
         """
-        if valid_acts is None:
-            return np.argmax([self._compute_priority(phase_pair, observations) for phase_pair in self._phase_pairs])
 
         scores = [
-            (ii, self._compute_priority(self._phase_pairs[idx], observations))
-            for idx, ii in valid_acts.items()
+            (sumo_idx, self._compute_priority(pp, observations))
+            for pp, sumo_idx in self._phase_pairs
         ]
-            # append the valid act with the highest score
+        # append the valid act with the highest score
         return max(scores, key=lambda x: x[1])[0]
 
     def observe(self, observation, reward, done, info):

@@ -6,11 +6,12 @@ import traci
 import traci.constants as tc
 import copy
 import re
-from resco_benchmark.config.signal_config import signal_configs
+
+from resco_benchmark.config.prototypes.signal_config import TrafficSignal, SignalNetworkConfig
+
 
 
 REVERSED_DIRECTIONS = {"N": "S", "E": "W", "S": "N", "W": "E"}
-
 
 def create_yellows(phases, yellow_length):
     new_phases = copy.copy(phases)
@@ -51,13 +52,13 @@ class _Dict:
 
 @dataclass
 class VehicleMeasures(_Dict):
-    id: str
-    speed: float
-    wait: float
-    acceleration: float
-    position: float
-    type: str
-    other: Dict[str, Any] = None
+    id: str = ""
+    speed: float = 0.0
+    wait: float = 0.0
+    acceleration: float = 0.0
+    position: float = 0.0
+    type: str = ""
+    other: Dict[str, Any] = None # this is for storing additional subscriptions
 
     def __getitem__(self, key):
         try:
@@ -68,10 +69,10 @@ class VehicleMeasures(_Dict):
 
 @dataclass
 class LaneMeasures(_Dict):
-    queue: int
-    approach: int
-    total_wait: int
-    max_wait: int
+    queue: int = field(default=0)
+    approach: int = field(default=0)
+    total_wait: int = field(default=0)
+    max_wait: int = field(default=0)
     _vehicles: List[VehicleMeasures] = field(default_factory=list)
 
     def add_vehicle(self, veh: VehicleMeasures) -> None:
@@ -200,17 +201,17 @@ class Signal:
     }
 
     def __init__(self, 
-        map_name: str, 
-        sumo: traci.Connection, 
         id: str, 
         yellow_length: float, 
-        min_green: float, 
+        min_green: float,         
         phases: Dict[str, List[traci.trafficlight.Phase]],
         reward_subscriptions: List[str],
         state_subscriptions: List[str],
+        signal_configs: SignalNetworkConfig,
         ):
+
         # sourcery skip: raise-specific-error
-        self.sumo: traci = sumo
+        self.sumo: traci = None # this is set later
         self.id: str = id
         self.yellow_time: float = yellow_length
         self.next_phase: int = 0
@@ -230,26 +231,35 @@ class Signal:
         self.waiting_times: Dict[str, float] = {}
 
         # Group of lanes constituting a direction of traffic
-        self.build_config(signal_configs[map_name])
+        self.build_config(signal_configs)
         self.phases, self.yellow_dict = create_yellows(phases, yellow_length)
 
         # logic = self.sumo.trafficlight.Logic(id, 0, 0, phases=self.phases) # not compatible with libsumo
-        programs = self.sumo.trafficlight.getAllProgramLogics(self.id)
-        logic = programs[0]
-        logic.type = 0
-        logic.phases = self.phases
-        self.sumo.trafficlight.setProgramLogic(self.id, logic)
         self.signals: List[Signal] = None  # Used to allow signal sharing
         self.full_observation: FullObservation = FullObservation()
 
         # build the internal state of the signal
         self._timer = _SignalTimer(min_yellow=yellow_length, min_green=min_green)
 
-        # sub to the lanes
-        self._sub_lane_info()
-
         # set the phase equal to the first phase
-        self._phase: int = self.sumo.trafficlight.getPhase(self.id)
+        self._phase: int = None
+    
+    
+    def init_traffic_light(self) -> None:
+        logic = self.sumo.trafficlight.getAllProgramLogics(self.id)[0]
+        logic.phases = self.phases
+        self.sumo.trafficlight.setProgramLogic(self.id, logic)
+    
+    def reintialize(self, sumo: traci.Connection):
+        self.sumo = sumo
+        self.init_traffic_light()
+        self._sub_lane_info()
+        self._phase = self.sumo.trafficlight.getPhase(self.id)
+        self._timer.reset()
+        self.full_observation = FullObservation()
+        self.waiting_times = {}
+        self.next_phase = -1 # reset so that the first action is observed
+
 
     def _sub_lane_info(
         self,
@@ -257,14 +267,14 @@ class Signal:
         for lane in self.lanes:
             self.sumo.lane.subscribe(lane, self.SUBSCRIPTIONS["lane"])
 
-    def build_config(self, myconfig):
+    def build_config(self, myconfig: SignalNetworkConfig):
         # sourcery skip: low-code-quality, raise-specific-error
-        if self.id not in myconfig:
+        if self.id not in myconfig.traffic_signals:
             raise NotImplementedError(f"{self.id} should be in configuration")
 
-        self.lane_sets = myconfig[self.id]["lane_sets"]
+        self.lane_sets = myconfig.traffic_signals[self.id].lane_sets
         self.lane_sets_outbound = self.lane_sets.fromkeys(self.lane_sets, [])
-        self.downstream = myconfig[self.id]["downstream"]
+        self.downstream = myconfig.traffic_signals[self.id].downstream
         self.inbounds_fr_direction = {}
 
         # inbound lanes
@@ -285,9 +295,7 @@ class Signal:
         self.out_lane_to_signalid = {}
         for direction, dwn_signal in self.downstream.items():
             if dwn_signal is not None:  # A downstream intersection exists
-                dwn_lane_sets = myconfig[dwn_signal][
-                    "lane_sets"
-                ]  # Get downstream signal's lanes
+                dwn_lane_sets = myconfig.traffic_signals[dwn_signal].lane_sets
                 for key in dwn_lane_sets:  # Find all inbound lanes from upstream
                     if key.split("-")[0] == direction:  # Downstream direction matches
                         dwn_lane_set = dwn_lane_sets[key]
@@ -315,7 +323,8 @@ class Signal:
 
     def set_phase(self, time_: float, new_phase: int) -> None:
         if not self._timer.okay_to_switch(time_):
-            # self.sumo.trafficlight.setPhase(self.id, self._phase)
+            # there could be some kind of a reward penalty here, 
+            # the controller should learn to not suggest a phase change unless it is time
             return 
 
         # should we allow a next phase override? (or is an action lasting)
@@ -340,22 +349,26 @@ class Signal:
             self.phase = self.next_phase
             self._timer.update(time_)
 
+    def observation_dry_run(self, ) -> None:
+        for lane in self.lanes:
+            lane_measure = LaneMeasures()
+            lane_measure.add_vehicle(
+                VehicleMeasures()
+            )
+            self.full_observation.lane_observations[lane] = lane_measure
+        
+        self.full_observation.update_vehicles({""})
+
+
     def observe(
         self,
         distance: float,
         veh_observations: Dict[str, Any],
         lane_observations: Dict[str, Any],
     ) -> None:
-        # full_observation = FullObservation()
-
         all_vehicles = set()
         for lane in self.lanes:
-            lane_measures = LaneMeasures(
-                0,
-                0,
-                0,
-                0,
-            )
+            lane_measures = LaneMeasures()
             for vehicle_id, vehicle_dict in self.filter_vehicles(
                 lane_observations[lane], distance, veh_observations
             ):

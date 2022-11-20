@@ -3,6 +3,7 @@
 #    '137525': {0: 0, 2: 1}
 # }
 # monaco_phase_pairs = [[1, 7], [3, 5], [4, 10]]
+from .prototypes.signal_config import SignalNetworkConfig
 
 
 signal_configs = {
@@ -2045,3 +2046,5 @@ signal_configs = {
         },
     }
 }
+
+signal_configs = {k: SignalNetworkConfig.from_dict(v) for k, v in signal_configs.items()}

@@ -1,4 +1,5 @@
 from copy import deepcopy
+import os
 import uuid
 
 from multi_signal import MultiSignal
@@ -12,6 +13,7 @@ try:
     from pymoo.optimize import minimize
     from pymoo.core.problem import DaskParallelization
     from pymoo.core.problem import ElementwiseProblem
+    from pymoo.core.result import Result
 
     NO_PYMOO = False
 except ImportError:
@@ -43,7 +45,6 @@ class GAProblem(ElementwiseProblem):
             # build the env and agent
             agent, env = build_agent_n_env(self._env_args, uuid.uuid4())
             
-
             # set the agent parameters
             agent.ga_set_params(x)
             
@@ -71,11 +72,11 @@ def ga_optimizer(
         raise ImportError("dask[distributed] not installed")
 
     # start dask client
-    client = Client(n_workers=1)
+    client = Client(n_workers=args.procs)
     client.restart()
 
     # initialize the thread pool and create the runner
-    # runner = DaskParallelization(client)
+    runner = DaskParallelization(client)
 
     # define the problem by passing the starmap interface of the thread pool
     problem = GAProblem(
@@ -83,8 +84,16 @@ def ga_optimizer(
         # elementwise_runner=runner
     )
 
-    res = minimize(problem, GA(), termination=("n_gen", 200), seed=1)
-    
+    from pymoo.operators.sampling.lhs import LHS
+    from pymoo.operators.mutation.pm import PolynomialMutation
+
+    res: Result = minimize(problem, GA(
+        sampling=LHS(),
+        mutation=PolynomialMutation(
+            prob=0.4
+        ),
+    ), termination=("n_gen", 1000), seed=42)
+
     print(res.X)
 
     # ga_instance.run()

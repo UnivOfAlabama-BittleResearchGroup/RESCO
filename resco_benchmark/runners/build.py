@@ -5,11 +5,19 @@ import argparse
 from resco_benchmark.config.agent_config import agent_configs
 from resco_benchmark.config.map_config import map_configs
 from resco_benchmark.config.mdp_config import mdp_configs
+from resco_benchmark.config.signal_config import signal_configs
 from resco_benchmark.multi_signal import MultiSignal
 from resco_benchmark.agents.agent import IndependentAgent, SharedAgent
+from resco_benchmark.config.prototypes import (
+    AgentConfig,
+    MapConfig,
+    SignalNetworkConfig,
+)
 
 
-def build_configs(args: argparse.Namespace) -> Tuple[dict, dict, int, list]:
+def build_configs(
+    args: argparse.Namespace,
+) -> Tuple[AgentConfig, MapConfig, SignalNetworkConfig, int, list]:
     """
     Build agent, map, and mdp configs
 
@@ -23,7 +31,7 @@ def build_configs(args: argparse.Namespace) -> Tuple[dict, dict, int, list]:
         Tuple[dict, dict, int, list]: Agent config, map config, number of steps per episode, route
     """
 
-
+    # Get the MDP Config
     mdp_config = mdp_configs.get(args.agent)
     if mdp_config is not None:
         mdp_map_config = mdp_config.get(args.map)
@@ -31,10 +39,8 @@ def build_configs(args: argparse.Namespace) -> Tuple[dict, dict, int, list]:
             mdp_config = mdp_map_config
         mdp_configs[args.agent] = mdp_config
 
+    # Setup the Agent
     agt_config = agent_configs[args.agent]
-    agt_map_config = agt_config.get(args.map)
-    if agt_map_config is not None:
-        agt_config = agt_map_config
 
     if mdp_config is not None:
         agt_config["mdp"] = mdp_config
@@ -48,7 +54,7 @@ def build_configs(args: argparse.Namespace) -> Tuple[dict, dict, int, list]:
             mdp_config["supervisors"] = supervisors
 
     map_config = map_configs[args.map]
-    route = map_config["route"]
+    route = map_config.route
     if route is not None:
         route = os.path.join(args.pwd, route)
     if args.map in ["grid4x4", "arterial4x4"] and not os.path.exists(route):
@@ -57,9 +63,9 @@ def build_configs(args: argparse.Namespace) -> Tuple[dict, dict, int, list]:
         )
 
     num_steps_eps = int(
-        (map_config["end_time"] - map_config["start_time"]) / map_config["step_length"]
+        (map_config.end_time - map_config.start_time) / map_config.step_length
     )
-    return agt_config, map_config, num_steps_eps, route
+    return agt_config, map_config, signal_configs[args.map], num_steps_eps, route
 
 
 def build_agent_n_env(
@@ -76,40 +82,24 @@ def build_agent_n_env(
         Tuple[SharedAgent, MultiSignal]: Agent and environment
     """
 
-    agt_config, map_config, num_steps_eps, route = build_configs(args)
-    alg = agt_config["agent"]
+    agt_config, map_config, signal_config, num_steps_eps, route = build_configs(args)
     env = MultiSignal(
-        f"{alg.__name__}-tr{trial}",
+        f"{agt_config.agent.__name__}-tr{trial}",
         args.map,
-        os.path.join(args.pwd, map_config["net"]),
-        agt_config["state"],
-        agt_config["reward"],
-        route=route,
-        step_length=map_config["step_length"],
-        yellow_length=map_config["yellow_length"],
-        step_ratio=map_config["step_ratio"],
-        end_time=map_config["end_time"],
-        max_distance=agt_config["max_distance"],
-        lights=map_config["lights"],
+        os.path.join(args.pwd, map_config.net),
+        agent_config=agt_config,
+        signal_config=signal_config,
+        map_config=map_config,
         gui=args.gui,
         log_dir=args.log_dir,
         libsumo=args.libsumo,
-        warmup=map_config["warmup"],
     )
 
-    agt_config["episodes"] = int(args.eps * 0.8)  # schedulers decay over 80% of steps
-    agt_config["steps"] = agt_config["episodes"] * num_steps_eps
-    agt_config["log_dir"] = os.path.join(args.log_dir, env.connection_name)
-    agt_config["num_lights"] = len(env.all_ts_ids)
-    # Get agent id's, observation shapes, and action sizes from env
-    obs_act = {
-        key: [
-            env.obs_shape[key],
-            len(env.phases[key]) if key in env.phases else None,
-        ]
-        for key in env.obs_shape
-    }
+    agt_config.episodes = int(args.eps * 0.8)  # schedulers decay over 80% of steps
+    agt_config.steps = agt_config.episodes * num_steps_eps
+    agt_config.log_dir = os.path.join(args.log_dir, env.connection_name)
+    agt_config.num_lights = len(env.all_ts_ids)
 
     # Create Agent
-    agent = alg(agt_config, obs_act, args.map, trial)
+    agent = agt_config.agent(signal_config, env.gym_shape, args.map, trial)
     return agent, env

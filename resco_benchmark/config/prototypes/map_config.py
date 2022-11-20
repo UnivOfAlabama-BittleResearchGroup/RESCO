@@ -45,7 +45,7 @@ def to_class(c: Type[T], x: Any) -> dict:
     return cast(Any, x).to_dict()
 
 
-class NetworkConfig:
+class MapConfig:
     lights: Optional[List[Any]]
     net: Optional[str]
     route: Optional[str]
@@ -79,7 +79,7 @@ class NetworkConfig:
         self.warmup = warmup
 
     @staticmethod
-    def from_dict(obj: Any) -> "NetworkConfig":
+    def from_dict(obj: Any) -> "MapConfig":
         assert isinstance(obj, dict)
         lights = from_union(
             [lambda x: from_list(lambda x: x, x), from_none], obj.get("lights")
@@ -92,7 +92,7 @@ class NetworkConfig:
         start_time = from_union([from_int, from_none], obj.get("start_time"))
         end_time = from_union([from_int, from_none], obj.get("end_time"))
         warmup = from_union([from_int, from_none], obj.get("warmup"))
-        return NetworkConfig(
+        return MapConfig(
             lights,
             net,
             route,
@@ -121,10 +121,13 @@ class NetworkConfig:
         result["warmup"] = from_union([from_int, from_none], self.warmup)
         return result
 
+    def get(self, key, default=None):
+        return getattr(self, key, default)
 
-def network_config_from_dict(s: Any) -> NetworkConfig:
-    return NetworkConfig.from_dict(s)
+
+def network_config_from_dict(s: Any) -> MapConfig:
+    return MapConfig.from_dict(s)
 
 
-def network_config_to_dict(x: NetworkConfig) -> Any:
-    return to_class(NetworkConfig, x)
+def network_config_to_dict(x: MapConfig) -> Any:
+    return to_class(MapConfig, x)

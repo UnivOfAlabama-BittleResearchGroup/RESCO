@@ -1,3 +1,5 @@
+from .prototypes.map_config import MapConfig
+
 map_configs = {
     "grid4x4": {
         "lights": [],
@@ -140,3 +142,6 @@ map_configs = {
         "warmup": 0,
     },
 }
+
+
+map_configs = {k: MapConfig.from_dict(v) for k, v in map_configs.items()}

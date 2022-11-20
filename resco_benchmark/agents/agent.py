@@ -1,4 +1,8 @@
+from typing import Any
 import torch
+
+from resco_benchmark.config.prototypes.signal_config import SignalNetworkConfig
+from resco_benchmark.states.states import State
 
 
 class Agent(object):
@@ -14,19 +18,25 @@ class Agent(object):
 
 
 class IndependentAgent(Agent):
-    def __init__(self, config, obs_act, map_name, thread_number):
+    def __init__(
+        self,
+        config: SignalNetworkConfig,
+        obs_act: dict,
+        map_name: str,
+        thread_number: int,
+    ):
         super().__init__()
         self.config = config
         self.agents = {}
         # save the observation and action space for each agent
 
-    def act(self, observation):
+    def act(self, observation: State):
         return {
             agent_id: self.agents[agent_id].act(observation[agent_id])
             for agent_id in observation.keys()
         }
 
-    def observe(self, observation, reward, done, info):
+    def observe(self, observation: State, reward: dict, done: bool, info: Any):
         for agent_id in observation.keys():
             self.agents[agent_id].observe(
                 observation[agent_id], reward[agent_id], done, info
@@ -36,14 +46,20 @@ class IndependentAgent(Agent):
 
 
 class SharedAgent(Agent):
-    def __init__(self, config, obs_act, map_name, thread_number):
+    def __init__(
+        self,
+        config: SignalNetworkConfig,
+        obs_act: dict,
+        map_name: str,
+        thread_number: int,
+    ):
         super().__init__()
         self.config = config
         self.agent = None
         self.valid_acts = None
         self.reverse_valid = None
 
-    def act(self, observation):
+    def act(self, observation: State):
         if self.reverse_valid is None and self.valid_acts is not None:
             self.reverse_valid = {
                 signal_id: {v: k for k, v in self.valid_acts[signal_id].items()}

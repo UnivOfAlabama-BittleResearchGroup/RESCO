@@ -1,5 +1,5 @@
-import resco_benchmark.rewards as rewards
-import resco_benchmark.states as states
+from resco_benchmark.rewards import rewards
+from resco_benchmark.states import states
 
 from resco_benchmark.agents.stochastic import STOCHASTIC
 from resco_benchmark.agents.maxwave import MAXWAVE
@@ -9,6 +9,8 @@ from resco_benchmark.agents.pfrl_dqn import IDQN
 from resco_benchmark.agents.pfrl_ppo import IPPO
 from resco_benchmark.agents.mplight import MPLight
 from resco_benchmark.agents.fma2c import FMA2C
+
+from resco_benchmark.config.prototypes.agent_config import AgentConfig
 
 agent_configs = {
     # *VAL configs have distance settings according to the validation scenarios
@@ -182,3 +184,6 @@ agent_configs = {
         "reward_clip": 2.0,
     },
 }
+
+
+agent_configs = {k: AgentConfig.from_dict(v) for k, v in agent_configs.items()}
