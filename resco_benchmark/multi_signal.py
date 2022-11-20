@@ -61,15 +61,13 @@ class MultiSignal(gym.Env):
         self.gymma = (
             gymma  # gymma expects sequential list of states/rewards instead of dict
         )
-        print(map_name, net, agent_config.state.__name__, agent_config.reward.__name__)
-        self.log_dir = log_dir
 
         # regex to find <net-file value="cologne3.net.xml"/> in an xml file
 
         self.net, self.sumo_config = find_net(net)
         self.route = map_config.route
         self.gui = gui
-        
+
         self.state_fn = agent_config.state
         self.state_subs = agent_config.state_subscriptions
         self.signal_config = signal_config
@@ -106,7 +104,6 @@ class MultiSignal(gym.Env):
         self.metrics = []
         self.wait_metric = {}
 
-
         net = sumolib.net.readNet(self.net, withPrograms=True)
         self._init_phases(net=net)
 
@@ -116,17 +113,14 @@ class MultiSignal(gym.Env):
 
         # Pull signal observation shapes
         self._init_agents(
-            self.all_ts_ids, 
-            self.reward_subs, 
-            self.state_subs, 
-            self.signal_config, 
-            net
+            self.all_ts_ids, self.reward_subs, self.state_subs, self.signal_config, net
         )
 
         self.connection_name = f"{run_name}-{map_name}-{len(self.signal_ids)}-{self.state_fn.__name__}-{self.reward_fn.__name__}"
 
-        if not os.path.exists(log_dir + self.connection_name):
-            os.makedirs(log_dir + self.connection_name)
+        # make the log directory
+        self.log_dir = os.path.join(log_dir, self.connection_name)
+        os.makedirs(self.log_dir, exist_ok=True)
 
         self.sumo_cmd = None
         print("Connection ID", self.connection_name)
@@ -142,7 +136,7 @@ class MultiSignal(gym.Env):
         reward_subs: Dict[str, int],
         state_subs: Dict[str, int],
         signal_config: SignalNetworkConfig,
-        net: sumolib.net.Net
+        net: sumolib.net.Net,
     ):
         # TODO: redo this without opening SUMO the first time!!!
         self.signals = {
@@ -164,19 +158,21 @@ class MultiSignal(gym.Env):
             veh_subs.extend(signal.SUBSCRIPTIONS["vehicle"])
         self.vehicle_subscriptions = set(veh_subs)
 
-        # observe the signal state 
+        # observe the signal state
         for signal in self.signals.values():
             signal.observation_dry_run()
 
         observations = self.state_fn(self.signals)
-        
+
         self.ts_order = []
         for ts in observations:
             if ts in ["top_mgr", "bot_mgr"]:
                 continue  # Not a traffic signal
             self.obs_shape[ts] = observations[ts].shape
             self.ts_order.append(ts)
-            self.observation_space.append(gym.spaces.Box(low=-np.inf, high=np.inf, shape=self.obs_shape[ts]))
+            self.observation_space.append(
+                gym.spaces.Box(low=-np.inf, high=np.inf, shape=self.obs_shape[ts])
+            )
             self.action_space.append(gym.spaces.Discrete(len(self.signals[ts].phases)))
 
     def _init_phases(
@@ -251,7 +247,7 @@ class MultiSignal(gym.Env):
             "-1",
             "--tripinfo-output",
             os.path.join(
-                self.log_dir, self.connection_name, f"tripinfo_{self.run}.xml"
+                self.log_dir, f"tripinfo_{self.run}.xml"
             ),
             "--tripinfo-output.write-unfinished",
             "--no-step-log",
@@ -266,7 +262,7 @@ class MultiSignal(gym.Env):
         else:
             traci.start(self.sumo_cmd, label=self.connection_name)
             self.sumo = traci.getConnection(self.connection_name)
-        
+
         # reset the signals
         for signal in self.signals.values():
             signal.reintialize(self.sumo)
@@ -276,7 +272,6 @@ class MultiSignal(gym.Env):
         # add one to get the initial observations, even though we haven't stepped yet
         for _ in range(self.warmup + 1):
             lane_obs, vehicle_obs = self.step_sim()
-        
 
         # 'Start' only signals set for control, rest run fixed controllers
         if self.run % 30 == 0 and self.ts_starter < len(self.all_ts_ids):
@@ -361,12 +356,10 @@ class MultiSignal(gym.Env):
             }
         )
 
-    def save_metrics(self):
-        log = os.path.join(
-            self.log_dir,
-            self.connection_name + os.sep + "metrics_" + str(self.run) + ".csv",
-        )
-        print("saving", log)
+    def save_metrics(self, additional_files: List[Tuple[str, callable]] = None):
+    
+        log = os.path.join(self.log_dir, f"metrics_{str(self.run)}.csv")
+        print("saving to ", self.log_dir)
         with open(log, "w+") as output_file:
             for line in self.metrics:
                 csv_line = ""
@@ -374,15 +367,21 @@ class MultiSignal(gym.Env):
                     csv_line = csv_line + str(line[metric]) + ", "
                 output_file.write(csv_line + "\n")
 
+        if additional_files is not None:
+            for file in additional_files:
+                with open(os.path.join(self.log_dir, file[0]), "w") as f:
+                    file[1](f)
+
     def render(self, mode="human"):
         pass
 
-    def close(self):
+    def close(self, save_metrics=True):
         with contextlib.suppress(traci.TraCIException):
             if not self.libsumo:
                 traci.switch(self.connection_name)
             traci.close()
-        self.save_metrics()
+        if save_metrics:
+            self.save_metrics()
 
     def get_total_reward(self):
         return sum(r for metric in self.metrics for r in metric["reward"].values())
