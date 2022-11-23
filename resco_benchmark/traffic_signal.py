@@ -7,11 +7,14 @@ import traci.constants as tc
 import copy
 import re
 
-from resco_benchmark.config.prototypes.signal_config import TrafficSignal, SignalNetworkConfig
-
+from resco_benchmark.config.prototypes.signal_config import (
+    TrafficSignal,
+    SignalNetworkConfig,
+)
 
 
 REVERSED_DIRECTIONS = {"N": "S", "E": "W", "S": "N", "W": "E"}
+
 
 def create_yellows(phases, yellow_length):
     new_phases = copy.copy(phases)
@@ -58,7 +61,7 @@ class VehicleMeasures(_Dict):
     acceleration: float = 0.0
     position: float = 0.0
     type: str = ""
-    other: Dict[str, Any] = None # this is for storing additional subscriptions
+    other: Dict[str, Any] = None  # this is for storing additional subscriptions
 
     def __getitem__(self, key):
         try:
@@ -82,7 +85,7 @@ class LaneMeasures(_Dict):
             self.max_wait = max(self.max_wait, veh.wait)
         else:
             self.approach += 1
-        
+
         self._vehicles.append(veh)
 
     @property
@@ -93,10 +96,7 @@ class LaneMeasures(_Dict):
 
     @property
     def fuel_consumption(self) -> float:
-        return sum(
-                v.fuel_consumption
-                for v in self._vehicles
-        )
+        return sum(v.fuel_consumption for v in self._vehicles)
 
 
 class FullObservation(_Dict):
@@ -152,7 +152,7 @@ class _SignalTimer:
     """
     There is no (all) red state in the timer for the time being
     """
-    
+
     # TODO: build support for all red
 
     def __init__(self, min_yellow: float, min_green: float) -> None:
@@ -196,29 +196,32 @@ class Signal:
             tc.VAR_SPEED,
             tc.VAR_ACCELERATION,
             tc.VAR_LANEPOSITION,
-            tc.VAR_TYPE
+            tc.VAR_TYPE,
         ],
     }
 
-    def __init__(self, 
-        id: str, 
-        yellow_length: float, 
-        min_green: float,         
+    def __init__(
+        self,
+        id: str,
+        yellow_length: float,
+        min_green: float,
         phases: Dict[str, List[traci.trafficlight.Phase]],
         reward_subscriptions: List[str],
         state_subscriptions: List[str],
         signal_configs: SignalNetworkConfig,
-        ):
+        libsumo: bool = False,
+    ):
 
         # sourcery skip: raise-specific-error
-        self.sumo: traci = None # this is set later
+        self.sumo: traci = None  # this is set later
         self.id: str = id
         self.yellow_time: float = yellow_length
         self.next_phase: int = 0
+        self._libsumo: bool = libsumo
 
         # update the subscription dict
         for subs in (reward_subscriptions, state_subscriptions):
-            for type_ in ('lane', 'vehicle'):
+            for type_ in ("lane", "vehicle"):
                 if type_ in subs:
                     self.SUBSCRIPTIONS[type_].extend(subs[type_])
                     self.SUBSCRIPTIONS[type_] = list(set(self.SUBSCRIPTIONS[type_]))
@@ -243,14 +246,21 @@ class Signal:
 
         # set the phase equal to the first phase
         self._phase: int = None
-    
-    
+
     def init_traffic_light(self) -> None:
+        if self._libsumo:
+            # this is a hack to get the sumolib -> libsumo conversion to work
+            self.phases = [
+                self.sumo.trafficlight.Phase(
+                    p.duration, p.state, p.minDur, p.maxDur, p.next
+                )
+                for p in self.phases
+            ]
         logic = self.sumo.trafficlight.getAllProgramLogics(self.id)[0]
         logic.phases = self.phases
         self.sumo.trafficlight.setProgramLogic(self.id, logic)
-    
-    def reintialize(self, sumo: traci.Connection):
+
+    def reintialize(self, sumo: traci) -> None:
         self.sumo = sumo
         self.init_traffic_light()
         self._sub_lane_info()
@@ -258,8 +268,7 @@ class Signal:
         self._timer.reset()
         self.full_observation = FullObservation()
         self.waiting_times = {}
-        self.next_phase = -1 # reset so that the first action is observed
-
+        self.next_phase = -1  # reset so that the first action is observed
 
     def _sub_lane_info(
         self,
@@ -323,9 +332,9 @@ class Signal:
 
     def set_phase(self, time_: float, new_phase: int) -> None:
         if not self._timer.okay_to_switch(time_):
-            # there could be some kind of a reward penalty here, 
+            # there could be some kind of a reward penalty here,
             # the controller should learn to not suggest a phase change unless it is time
-            return 
+            return
 
         # should we allow a next phase override? (or is an action lasting)
         self.next_phase = new_phase
@@ -334,7 +343,7 @@ class Signal:
             if self._phase == new_phase:
                 # we are already in the right phase, have to write to the sumo
                 return self.sumo.trafficlight.setPhase(self.id, self._phase)
-            
+
             # a yellow phase is needed
             key = f"{str(self.phase)}_{self.next_phase}"
             # not sure why this gaurd is here, what do we do if we don't have a yellow time?
@@ -349,16 +358,15 @@ class Signal:
             self.phase = self.next_phase
             self._timer.update(time_)
 
-    def observation_dry_run(self, ) -> None:
+    def observation_dry_run(
+        self,
+    ) -> None:
         for lane in self.lanes:
             lane_measure = LaneMeasures()
-            lane_measure.add_vehicle(
-                VehicleMeasures()
-            )
+            lane_measure.add_vehicle(VehicleMeasures())
             self.full_observation.lane_observations[lane] = lane_measure
-        
-        self.full_observation.update_vehicles({""})
 
+        self.full_observation.update_vehicles({""})
 
     def observe(
         self,
@@ -403,10 +411,14 @@ class Signal:
         self, lane_dict: Dict[str, Any], max_distance: float, veh_dict: Dict[str, Any]
     ) -> Iterable[Tuple[str, Dict]]:
         for vehicle in lane_dict[tc.LAST_STEP_VEHICLE_ID_LIST]:
-            path = veh_dict[vehicle][tc.VAR_NEXT_TLS]
+            path = (
+                self.sumo.vehicle.getNextTLS(vehicle)
+                if self._libsumo
+                else veh_dict[vehicle][tc.VAR_NEXT_TLS]
+            )
+
             if len(path) > 0:
                 next_light = path[0]
                 distance = next_light[2]
-                if distance <= max_distance:  # Detectors have a max range
-                    yield vehicle, veh_dict[vehicle]
-
+                if distance <= max_distance:
+                    yield (vehicle, veh_dict[vehicle])

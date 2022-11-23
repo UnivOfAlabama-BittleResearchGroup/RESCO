@@ -148,6 +148,7 @@ class MultiSignal(gym.Env):
                 reward_subscriptions=reward_subs,
                 state_subscriptions=state_subs,
                 signal_configs=signal_config,
+                libsumo=self.libsumo,
             )
             for signal_id in signal_ids
         }
@@ -213,7 +214,7 @@ class MultiSignal(gym.Env):
 
         # subscribe to all new vehicles in the network
         for veh in self.sumo.simulation.getDepartedIDList():
-            self.sumo.vehicle.subscribe(veh, self.vehicle_subscriptions)
+            self.sumo.vehicle.subscribe(veh, list(self.vehicle_subscriptions))
 
         # return the lane & vehicle observations
         return (
